@@ -20,6 +20,10 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.log_level, LogLevel.INFO)
         self.assertEqual(settings.max_ticker_datapoints, 150)
         self.assertEqual(settings.price_fetch_interval_minutes, 15)
+        self.assertEqual(settings.twelve_data_requests_per_minute, 8)
+        self.assertEqual(settings.twelve_data_rate_limit_buffer_seconds, 1.0)
+        self.assertEqual(settings.twelve_data_max_retries, 2)
+        self.assertEqual(settings.twelve_data_retry_base_delay_seconds, 5.0)
         self.assertEqual(settings.sharp_move_check_interval_minutes, 15)
         self.assertEqual(settings.default_sharp_move_threshold, 0.025)
         self.assertEqual(settings.default_hypothesis_scan_days, 3)
@@ -36,6 +40,10 @@ class SettingsTests(unittest.TestCase):
                 "LANGSMITH_PROJECT": "sentient-tests",
                 "MAX_TICKER_DATAPOINTS": "200",
                 "PRICE_FETCH_INTERVAL_MINUTES": "30",
+                "TWELVE_DATA_REQUESTS_PER_MINUTE": "15",
+                "TWELVE_DATA_RATE_LIMIT_BUFFER_SECONDS": "5",
+                "TWELVE_DATA_MAX_RETRIES": "3",
+                "TWELVE_DATA_RETRY_BASE_DELAY_SECONDS": "7.5",
                 "DEFAULT_SHARP_MOVE_THRESHOLD": "0.04",
                 "TWILIO_WHATSAPP_FROM": "whatsapp:+15551234567",
             }
@@ -47,6 +55,10 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.langsmith_project, "sentient-tests")
         self.assertEqual(settings.max_ticker_datapoints, 200)
         self.assertEqual(settings.price_fetch_interval_minutes, 30)
+        self.assertEqual(settings.twelve_data_requests_per_minute, 15)
+        self.assertEqual(settings.twelve_data_rate_limit_buffer_seconds, 5.0)
+        self.assertEqual(settings.twelve_data_max_retries, 3)
+        self.assertEqual(settings.twelve_data_retry_base_delay_seconds, 7.5)
         self.assertEqual(settings.default_sharp_move_threshold, 0.04)
         self.assertEqual(settings.twilio_whatsapp_from, "whatsapp:+15551234567")
 
@@ -91,11 +103,22 @@ class SettingsTests(unittest.TestCase):
         invalid_values = [
             {"MAX_TICKER_DATAPOINTS": "0"},
             {"PRICE_FETCH_INTERVAL_MINUTES": "0"},
+            {"TWELVE_DATA_REQUESTS_PER_MINUTE": "0"},
             {"SHARP_MOVE_CHECK_INTERVAL_MINUTES": "-1"},
             {"DEFAULT_HYPOTHESIS_SCAN_DAYS": "0"},
         ]
 
         for env in invalid_values:
+            with self.subTest(env=env):
+                with self.assertRaises(ValidationError):
+                    load_settings(env)
+
+        scheduler_values = [
+            {"TWELVE_DATA_MAX_RETRIES": "-1"},
+            {"TWELVE_DATA_RATE_LIMIT_BUFFER_SECONDS": "-1"},
+            {"TWELVE_DATA_RETRY_BASE_DELAY_SECONDS": "-1"},
+        ]
+        for env in scheduler_values:
             with self.subTest(env=env):
                 with self.assertRaises(ValidationError):
                     load_settings(env)

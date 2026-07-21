@@ -47,6 +47,10 @@ class Settings(BaseSettings):
 
     max_ticker_datapoints: int = 150
     price_fetch_interval_minutes: int = 15
+    twelve_data_requests_per_minute: int = 8
+    twelve_data_rate_limit_buffer_seconds: float = 1.0
+    twelve_data_max_retries: int = 2
+    twelve_data_retry_base_delay_seconds: float = 5.0
     sharp_move_check_interval_minutes: int = 15
     default_sharp_move_threshold: float = 0.025
     default_hypothesis_scan_days: int = 3
@@ -61,6 +65,7 @@ class Settings(BaseSettings):
     @field_validator(
         "max_ticker_datapoints",
         "price_fetch_interval_minutes",
+        "twelve_data_requests_per_minute",
         "sharp_move_check_interval_minutes",
         "default_hypothesis_scan_days",
     )
@@ -68,6 +73,23 @@ class Settings(BaseSettings):
     def must_be_positive(cls, value: int) -> int:
         if value <= 0:
             raise ValueError("Setting must be greater than zero")
+        return value
+
+    @field_validator("twelve_data_max_retries")
+    @classmethod
+    def retries_must_be_non_negative(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("twelve_data_max_retries must be non-negative")
+        return value
+
+    @field_validator(
+        "twelve_data_rate_limit_buffer_seconds",
+        "twelve_data_retry_base_delay_seconds",
+    )
+    @classmethod
+    def scheduler_delays_must_be_valid(cls, value: float) -> float:
+        if value < 0:
+            raise ValueError("Scheduler delays must be non-negative")
         return value
 
     @field_validator("default_sharp_move_threshold")
