@@ -222,6 +222,30 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(client.tables[0].calls[0][0], "upsert")
         self.assertEqual(client.tables[0].calls[0][1][0]["ticker"], "NVDA")
 
+    def test_upsert_ticker_data_writes_all_points_in_one_request(self):
+        older = point_row("2026-01-01T00:00:00+00:00")
+        newer = point_row("2026-01-01T00:15:00+00:00")
+        client = FakeClient({"ticker_data": [older, newer]})
+        points = [OHLCVPoint.model_validate(older), OHLCVPoint.model_validate(newer)]
+
+        returned = database.upsert_ticker_data(points, client=client)
+
+        self.assertEqual(returned, points)
+        self.assertEqual(len(client.tables), 1)
+        method, args, kwargs = client.tables[0].calls[0]
+        self.assertEqual(method, "upsert")
+        self.assertEqual(len(args[0]), 2)
+        self.assertTrue(all(row["ticker"] == "NVDA" for row in args[0]))
+        self.assertEqual(kwargs, {"on_conflict": "ticker,timestamp"})
+
+    def test_upsert_ticker_data_skips_database_for_empty_list(self):
+        client = FakeClient({})
+
+        returned = database.upsert_ticker_data([], client=client)
+
+        self.assertEqual(returned, [])
+        self.assertEqual(client.tables, [])
+
     def test_get_latest_ticker_data_returns_chronological_points(self):
         newer = point_row("2026-01-01T00:15:00+00:00")
         older = point_row("2026-01-01T00:00:00+00:00")

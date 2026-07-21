@@ -11,7 +11,7 @@ from models.schemas import OHLCVPoint, Ticker
 
 
 DEFAULT_INTERVAL = "15min"
-DEFAULT_LOOKBACK_DAYS = 5
+DEFAULT_LOOKBACK_DAYS = 10
 DEFAULT_TIMEZONE = "UTC"
 
 
@@ -150,8 +150,6 @@ def refresh_ticker_data(
         )
     )
 
-    for point in points:
-        database.insert_ticker_data(point)
-
+    database.upsert_ticker_data(points)
     database.delete_old_ticker_data(_ticker_symbol(ticker), keep=limit)
     return points

@@ -67,7 +67,6 @@ class TwelveDataTests(unittest.TestCase):
             "nvda",
             limit=2,
             to_date=datetime(2026, 7, 16, 20, 0, tzinfo=timezone.utc),
-            lookback_days=2,
             client=client,
         )
 
@@ -78,7 +77,7 @@ class TwelveDataTests(unittest.TestCase):
             outputsize=2,
             timezone="UTC",
             order="DESC",
-            start_date="2026-07-14 20:00:00",
+            start_date="2026-07-06 20:00:00",
             end_date="2026-07-16 20:00:00",
         )
         request.as_json.assert_called_once_with()
@@ -103,15 +102,15 @@ class TwelveDataTests(unittest.TestCase):
         with patch("data.twelve_data.fetch_intraday_ohlcv", return_value=points):
             with patch("data.twelve_data.database.upsert_ticker") as upsert_ticker:
                 with patch(
-                    "data.twelve_data.database.insert_ticker_data"
-                ) as insert_ticker_data:
+                    "data.twelve_data.database.upsert_ticker_data"
+                ) as upsert_ticker_data:
                     with patch(
                         "data.twelve_data.database.delete_old_ticker_data"
                     ) as delete_old:
                         returned = twelve_data.refresh_ticker_data("nvda", limit=2)
 
         self.assertEqual(returned, points)
-        self.assertEqual(insert_ticker_data.call_count, 1)
+        upsert_ticker_data.assert_called_once_with(points)
         upserted_ticker = upsert_ticker.call_args.args[0]
         self.assertIsInstance(upserted_ticker, Ticker)
         self.assertEqual(upserted_ticker.ticker, "NVDA")

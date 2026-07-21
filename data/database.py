@@ -240,6 +240,26 @@ def insert_ticker_data(point: OHLCVPoint, *, client: Optional[Client] = None) ->
     return _parse_model(OHLCVPoint, row)
 
 
+def upsert_ticker_data(
+    points: list[OHLCVPoint], *, client: Optional[Client] = None
+) -> list[OHLCVPoint]:
+    if not points:
+        return []
+
+    payloads = []
+    for point in points:
+        payload = _model_payload(point)
+        payload["ticker"] = _ticker_symbol(payload["ticker"])
+        payloads.append(payload)
+
+    response = _execute(
+        _client(client)
+        .table("ticker_data")
+        .upsert(payloads, on_conflict="ticker,timestamp")
+    )
+    return _parse_model_list(OHLCVPoint, response.data)
+
+
 def get_latest_ticker_data(
     ticker: str, limit: int = settings.max_ticker_datapoints, *, client: Optional[Client] = None
 ) -> list[OHLCVPoint]:
