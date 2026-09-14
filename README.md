@@ -49,6 +49,38 @@ Opportunity discovery is not included in the current five-agent count because it
 requires separate market-data coverage, cost controls, ranking logic, licensing
 review, and safety evaluation.
 
+## Later: evaluation data and continuous improvement
+
+Build a structured evaluation dataset from agent runs to improve the system over
+time. Retain:
+
+- Agent input conditions and final outputs
+- Tools and sources used
+- User feedback on usefulness and accuracy
+- Subsequent stock movement after 1 hour, 1 day, and 5 days
+- Prompt, graph, and model versions
+
+Use this dataset to compare agent versions, reduce false alerts, improve research
+quality, and verify that changes produce measurable gains. LangSmith will support
+debugging and trace inspection; structured feedback and market outcomes will drive
+long-term evaluation and improvement.
+
+### Far-future experiment: smaller-model fine-tuning
+
+As a highly speculative later phase, evaluate whether the accumulated, de-identified
+dataset can fine-tune or distill a smaller open-weight model, potentially using a
+Qwen-family backbone, for narrow and frequent agent decisions. Candidate tasks
+include trigger classification, search-or-no-search routing, evidence sufficiency,
+alert prioritization, and cadence selection.
+
+The smaller model would handle repetitive decisions only when offline evaluation
+shows that it can match an established frontier-model baseline. Complex research,
+ambiguous cases, and final high-impact synthesis would continue to use a frontier
+model. The goal would be to reduce inference cost and latency without accepting a
+measurable quality regression. This work requires sufficient high-quality examples,
+privacy review, licensing review, held-out evaluations, and rollback thresholds
+before production use.
+
 ## Core flow
 
 ```text

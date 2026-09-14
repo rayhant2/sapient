@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from functools import lru_cache
-from typing import Any, Optional, TypeVar
+from typing import Any, Optional, TypeAlias, TypeVar
 
 from pydantic import BaseModel
 from pydantic import SecretStr
@@ -11,7 +11,11 @@ from supabase import Client, create_client
 from config.settings import settings
 from models.schemas import (
     AgentOutput,
+    AgentType,
     Alert,
+    CrossPortfolioOutput,
+    EventType,
+    HypothesisOutput,
     OHLCVPoint,
     Subscription,
     Ticker,
@@ -34,6 +38,13 @@ class MissingSupabaseConfigError(DatabaseError):
 
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
+StoredAgentOutput: TypeAlias = AgentOutput | HypothesisOutput | CrossPortfolioOutput
+
+_AGENT_TYPE_BY_EVENT = {
+    EventType.SCHEDULED_UPDATE: AgentType.SCHEDULED_REVIEW,
+    EventType.SHARP_MOVE: AgentType.SHARP_MOVE,
+    EventType.MOTIVE_CHECK: AgentType.MOTIVE,
+}
 
 
 @lru_cache(maxsize=1)
@@ -471,8 +482,42 @@ def delete_old_ticker_data(
     )
 
 
-def _agent_output_payload(output: AgentOutput) -> dict[str, Any]:
+def _agent_output_payload(output: StoredAgentOutput) -> dict[str, Any]:
     payload = _model_payload(output)
+    if isinstance(output, CrossPortfolioOutput):
+        return {
+            "user_id": payload["user_id"],
+            "ticker": None,
+            "timestamp": payload["timestamp"],
+            "agent_type": AgentType.CROSS_PORTFOLIO.value,
+            "event_type": None,
+            "summary": payload["summary"],
+            "recommendation": None,
+            "confidence": None,
+            "price_at_update": None,
+            "searched_web": False,
+            "metadata": {
+                "correlations_flagged": payload["correlations_flagged"],
+                "tickers_analyzed": [
+                    _ticker_symbol(ticker) for ticker in payload["tickers_analyzed"]
+                ],
+            },
+        }
+
+    if isinstance(output, HypothesisOutput):
+        agent_type = AgentType.HYPOTHESIS
+    else:
+        if output.event_type == EventType.HYPOTHESIS_SCAN:
+            raise DatabaseError(
+                "Hypothesis outputs must use the HypothesisOutput schema."
+            )
+        try:
+            agent_type = _AGENT_TYPE_BY_EVENT[output.event_type]
+        except KeyError as exc:
+            raise DatabaseError(
+                f"No agent type maps to event type {output.event_type.value}."
+            ) from exc
+
     allowed_columns = {
         "ticker",
         "user_id",
@@ -491,26 +536,83 @@ def _agent_output_payload(output: AgentOutput) -> dict[str, Any]:
     }
     row = {key: value for key, value in payload.items() if key in allowed_columns}
     row["ticker"] = _ticker_symbol(row["ticker"])
-    if metadata:
-        row["metadata"] = metadata
+    row["agent_type"] = agent_type.value
+    row["metadata"] = metadata
     return row
 
 
+def _parse_agent_output_row(row: dict[str, Any]) -> StoredAgentOutput:
+    try:
+        agent_type = AgentType(row["agent_type"])
+    except (KeyError, ValueError, TypeError) as exc:
+        raise DatabaseError("Stored update has an unknown or missing agent_type.") from exc
+
+    metadata = row.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        raise DatabaseError("Stored update metadata must be an object.")
+
+    if agent_type == AgentType.CROSS_PORTFOLIO:
+        payload = {
+            "user_id": row.get("user_id"),
+            "timestamp": row.get("timestamp"),
+            "summary": row.get("summary"),
+            "correlations_flagged": metadata.get("correlations_flagged", []),
+            "tickers_analyzed": metadata.get("tickers_analyzed", []),
+        }
+        return _parse_model(CrossPortfolioOutput, payload)
+
+    payload = {
+        key: row.get(key)
+        for key in (
+            "ticker",
+            "user_id",
+            "event_type",
+            "summary",
+            "recommendation",
+            "confidence",
+            "timestamp",
+            "price_at_update",
+            "searched_web",
+        )
+    }
+    if agent_type == AgentType.HYPOTHESIS:
+        payload.update(
+            flagged=metadata.get("flagged", False),
+            recommended_next_scan_days=metadata.get("recommended_next_scan_days"),
+        )
+        return _parse_model(HypothesisOutput, payload)
+
+    expected_agent_type = _AGENT_TYPE_BY_EVENT.get(payload["event_type"])
+    if expected_agent_type != agent_type:
+        raise DatabaseError(
+            "Stored update agent_type does not match its event_type."
+        )
+    return _parse_model(AgentOutput, payload)
+
+
+def _parse_agent_output_list(rows: Any) -> list[StoredAgentOutput]:
+    if rows is None:
+        return []
+    if not isinstance(rows, list):
+        raise DatabaseError(f"Expected a list of rows, received {type(rows)!r}.")
+    return [_parse_agent_output_row(row) for row in rows]
+
+
 def insert_agent_output(
-    output: AgentOutput, *, client: Optional[Client] = None
-) -> AgentOutput:
+    output: StoredAgentOutput, *, client: Optional[Client] = None
+) -> StoredAgentOutput:
     response = _execute(
         _client(client)
         .table("updates")
         .insert(_agent_output_payload(output))
     )
     row = _require_single_row(response.data, "insert_agent_output")
-    return _parse_model(AgentOutput, row)
+    return _parse_agent_output_row(row)
 
 
 def list_updates_for_user(
     user_id: str, limit: int = 50, *, client: Optional[Client] = None
-) -> list[AgentOutput]:
+) -> list[StoredAgentOutput]:
     response = _execute(
         _client(client)
         .table("updates")
@@ -519,12 +621,12 @@ def list_updates_for_user(
         .order("timestamp", desc=True)
         .limit(limit)
     )
-    return _parse_model_list(AgentOutput, response.data)
+    return _parse_agent_output_list(response.data)
 
 
 def list_updates_for_user_ticker(
     user_id: str, ticker: str, limit: int = 20, *, client: Optional[Client] = None
-) -> list[AgentOutput]:
+) -> list[StoredAgentOutput]:
     response = _execute(
         _client(client)
         .table("updates")
@@ -534,7 +636,7 @@ def list_updates_for_user_ticker(
         .order("timestamp", desc=True)
         .limit(limit)
     )
-    return _parse_model_list(AgentOutput, response.data)
+    return _parse_agent_output_list(response.data)
 
 
 def insert_alert(alert: Alert, *, client: Optional[Client] = None) -> Alert:

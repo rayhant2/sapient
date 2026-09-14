@@ -10,9 +10,11 @@ from pydantic import ValidationError
 from data import database
 from models.schemas import (
     AgentOutput,
+    AgentType,
     Alert,
     AlertType,
     Confidence,
+    CrossPortfolioOutput,
     EventType,
     HypothesisOutput,
     Motive,
@@ -131,6 +133,7 @@ def update_row():
     return {
         "ticker": "NVDA",
         "user_id": "user-1",
+        "agent_type": "sharp_move",
         "event_type": "sharp_move",
         "summary": "NVDA moved sharply.",
         "recommendation": "Review the position.",
@@ -139,6 +142,44 @@ def update_row():
         "price_at_update": 500.25,
         "searched_web": True,
         "metadata": {},
+    }
+
+
+def hypothesis_row(*, flagged: bool = True):
+    return {
+        "ticker": "NVDA",
+        "user_id": "user-1",
+        "agent_type": "hypothesis",
+        "event_type": "hypothesis_scan",
+        "summary": "Pattern developing." if flagged else None,
+        "recommendation": "Watch closely." if flagged else "",
+        "confidence": "medium",
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "price_at_update": 500.25,
+        "searched_web": flagged,
+        "metadata": {
+            "flagged": flagged,
+            "recommended_next_scan_days": 1 if flagged else 3,
+        },
+    }
+
+
+def cross_portfolio_row():
+    return {
+        "ticker": None,
+        "user_id": "user-1",
+        "agent_type": "cross_portfolio",
+        "event_type": None,
+        "summary": "Semiconductor exposure is concentrated.",
+        "recommendation": None,
+        "confidence": None,
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "price_at_update": None,
+        "searched_web": False,
+        "metadata": {
+            "correlations_flagged": ["NVDA and AMD moved together"],
+            "tickers_analyzed": ["NVDA", "AMD"],
+        },
     }
 
 
@@ -359,7 +400,7 @@ class DatabaseTests(unittest.TestCase):
         )
 
     def test_insert_agent_output_preserves_subclass_fields_in_metadata(self):
-        client = FakeClient({"updates": [update_row()]})
+        client = FakeClient({"updates": [hypothesis_row()]})
         output = HypothesisOutput(
             ticker="nvda",
             user_id="user-1",
@@ -374,16 +415,88 @@ class DatabaseTests(unittest.TestCase):
         returned = database.insert_agent_output(output, client=client)
 
         payload = client.tables[0].calls[0][1][0]
-        self.assertIsInstance(returned, AgentOutput)
+        self.assertIsInstance(returned, HypothesisOutput)
+        self.assertTrue(returned.flagged)
+        self.assertEqual(returned.recommended_next_scan_days, 1)
         self.assertEqual(payload["ticker"], "NVDA")
+        self.assertEqual(payload["agent_type"], AgentType.HYPOTHESIS.value)
         self.assertEqual(payload["event_type"], EventType.HYPOTHESIS_SCAN.value)
         self.assertEqual(
             payload["metadata"],
             {"flagged": True, "recommended_next_scan_days": 1},
         )
 
+    def test_unflagged_hypothesis_round_trip_allows_null_summary(self):
+        client = FakeClient({"updates": [hypothesis_row(flagged=False)]})
+        output = HypothesisOutput(
+            ticker="nvda",
+            user_id="user-1",
+            summary=None,
+            confidence=Confidence.MEDIUM,
+            recommended_next_scan_days=3,
+        )
+
+        returned = database.insert_agent_output(output, client=client)
+
+        payload = client.tables[0].calls[0][1][0]
+        self.assertIsNone(payload.get("summary"))
+        self.assertIsInstance(returned, HypothesisOutput)
+        self.assertFalse(returned.flagged)
+
+    def test_cross_portfolio_output_round_trip(self):
+        client = FakeClient({"updates": [cross_portfolio_row()]})
+        output = CrossPortfolioOutput(
+            user_id="user-1",
+            summary="Semiconductor exposure is concentrated.",
+            correlations_flagged=["NVDA and AMD moved together"],
+            tickers_analyzed=["nvda", "amd"],
+        )
+
+        returned = database.insert_agent_output(output, client=client)
+
+        payload = client.tables[0].calls[0][1][0]
+        self.assertIsInstance(returned, CrossPortfolioOutput)
+        self.assertIsNone(payload["ticker"])
+        self.assertIsNone(payload["event_type"])
+        self.assertEqual(payload["agent_type"], AgentType.CROSS_PORTFOLIO.value)
+        self.assertEqual(payload["metadata"]["tickers_analyzed"], ["NVDA", "AMD"])
+
+    def test_unknown_agent_type_is_rejected(self):
+        row = update_row()
+        row["agent_type"] = "unknown"
+
+        with self.assertRaises(database.DatabaseError):
+            database._parse_agent_output_row(row)
+
+    def test_hypothesis_missing_required_metadata_is_rejected(self):
+        row = hypothesis_row()
+        row["metadata"] = {"flagged": True}
+
+        with self.assertRaises(ValidationError):
+            database._parse_agent_output_row(row)
+
+    def test_agent_type_must_match_event_type(self):
+        row = update_row()
+        row["agent_type"] = "motive"
+
+        with self.assertRaises(database.DatabaseError):
+            database._parse_agent_output_row(row)
+
+    def test_plain_hypothesis_agent_output_is_rejected(self):
+        output = AgentOutput(
+            ticker="NVDA",
+            user_id="user-1",
+            event_type=EventType.HYPOTHESIS_SCAN,
+            summary="Incomplete hypothesis output.",
+            recommendation="Watch.",
+            confidence=Confidence.LOW,
+        )
+
+        with self.assertRaises(database.DatabaseError):
+            database._agent_output_payload(output)
+
     def test_list_updates_for_user_ticker_parses_agent_outputs(self):
-        client = FakeClient({"updates": [[update_row()]]})
+        client = FakeClient({"updates": [[update_row(), hypothesis_row()]]})
 
         outputs = database.list_updates_for_user_ticker(
             "user-1",
@@ -391,8 +504,9 @@ class DatabaseTests(unittest.TestCase):
             client=client,
         )
 
-        self.assertEqual(len(outputs), 1)
+        self.assertEqual(len(outputs), 2)
         self.assertEqual(outputs[0].event_type, EventType.SHARP_MOVE)
+        self.assertIsInstance(outputs[1], HypothesisOutput)
         self.assertIn(("eq", ("ticker", "NVDA"), {}), client.tables[0].calls)
 
     def test_insert_alert_returns_alert_model(self):

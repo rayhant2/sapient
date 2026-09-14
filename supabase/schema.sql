@@ -70,15 +70,25 @@ create table if not exists public.updates (
     user_id text not null references public.users(user_id) on delete cascade,
     ticker text references public.tickers(ticker) on delete set null,
     "timestamp" timestamptz not null default now(),
-    event_type text not null,
-    summary text not null,
-    recommendation text not null,
-    confidence text not null,
+    agent_type text not null,
+    event_type text,
+    summary text,
+    recommendation text,
+    confidence text,
     price_at_update numeric(18, 6),
     searched_web boolean not null default false,
     metadata jsonb not null default '{}'::jsonb,
     constraint updates_price_at_update_non_negative
         check (price_at_update is null or price_at_update >= 0),
+    constraint updates_agent_type_valid check (
+        agent_type in (
+            'scheduled_review',
+            'sharp_move',
+            'motive',
+            'hypothesis',
+            'cross_portfolio'
+        )
+    ),
     constraint updates_event_type_valid check (
         event_type in (
             'scheduled_update',
@@ -89,8 +99,76 @@ create table if not exists public.updates (
     ),
     constraint updates_confidence_valid check (
         confidence in ('high', 'medium', 'low')
+    ),
+    constraint updates_output_shape_valid check (
+        (
+            agent_type = 'cross_portfolio'
+            and ticker is null
+            and event_type is null
+            and summary is not null
+        )
+        or
+        (
+            agent_type <> 'cross_portfolio'
+            and ticker is not null
+            and event_type is not null
+            and recommendation is not null
+            and confidence is not null
+            and (summary is not null or agent_type = 'hypothesis')
+        )
     )
 );
+
+alter table public.updates
+    add column if not exists agent_type text;
+
+update public.updates
+set agent_type = case event_type
+    when 'scheduled_update' then 'scheduled_review'
+    when 'sharp_move' then 'sharp_move'
+    when 'motive_check' then 'motive'
+    when 'hypothesis_scan' then 'hypothesis'
+end
+where agent_type is null;
+
+alter table public.updates
+    alter column agent_type set not null,
+    alter column event_type drop not null,
+    alter column summary drop not null,
+    alter column recommendation drop not null,
+    alter column confidence drop not null;
+
+alter table public.updates
+    drop constraint if exists updates_agent_type_valid,
+    drop constraint if exists updates_output_shape_valid;
+
+alter table public.updates
+    add constraint updates_agent_type_valid check (
+        agent_type in (
+            'scheduled_review',
+            'sharp_move',
+            'motive',
+            'hypothesis',
+            'cross_portfolio'
+        )
+    ),
+    add constraint updates_output_shape_valid check (
+        (
+            agent_type = 'cross_portfolio'
+            and ticker is null
+            and event_type is null
+            and summary is not null
+        )
+        or
+        (
+            agent_type <> 'cross_portfolio'
+            and ticker is not null
+            and event_type is not null
+            and recommendation is not null
+            and confidence is not null
+            and (summary is not null or agent_type = 'hypothesis')
+        )
+    );
 
 create table if not exists public.alerts (
     id bigint generated always as identity primary key,
@@ -129,6 +207,9 @@ create index if not exists idx_updates_user_timestamp_desc
 
 create index if not exists idx_updates_user_ticker_timestamp_desc
     on public.updates(user_id, ticker, "timestamp" desc);
+
+create index if not exists idx_updates_user_agent_timestamp_desc
+    on public.updates(user_id, agent_type, "timestamp" desc);
 
 create index if not exists idx_alerts_user_timestamp_desc
     on public.alerts(user_id, "timestamp" desc);

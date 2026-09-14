@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from models.schemas import (
     AgentContext,
+    AgentType,
     Alert,
     AlertType,
     Confidence,
@@ -58,6 +59,18 @@ def make_agent_context(user_id: str = "user-1", ticker: str = "NVDA") -> AgentCo
 
 
 class SchemaTests(unittest.TestCase):
+    def test_agent_types_identify_all_planned_agents(self):
+        self.assertEqual(
+            {agent_type.value for agent_type in AgentType},
+            {
+                "scheduled_review",
+                "sharp_move",
+                "motive",
+                "hypothesis",
+                "cross_portfolio",
+            },
+        )
+
     def test_ohlcv_rejects_negative_prices_and_volume(self):
         with self.assertRaises(ValidationError):
             OHLCVPoint(

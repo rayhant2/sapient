@@ -59,6 +59,14 @@ class EventType(str, Enum):
     HYPOTHESIS_SCAN = "hypothesis_scan" # periodically check for anything worth flagging in the more recent 150 datapoints we have (per stock)
 
 
+class AgentType(str, Enum):
+    SCHEDULED_REVIEW = "scheduled_review"
+    SHARP_MOVE = "sharp_move"
+    MOTIVE = "motive"
+    HYPOTHESIS = "hypothesis"
+    CROSS_PORTFOLIO = "cross_portfolio"
+
+
 class Confidence(str, Enum):
     HIGH = "high"
     MEDIUM = "medium"

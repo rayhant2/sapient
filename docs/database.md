@@ -71,14 +71,21 @@ History of agent outputs.
 Important fields:
 
 - `user_id`: owner of the update.
-- `ticker`: ticker being discussed, nullable for future portfolio-level outputs.
-- `event_type`: one of the `EventType` values from `models/schemas.py`.
-- `summary`: agent-written summary.
-- `recommendation`: agent-written recommendation or next-step framing.
-- `confidence`: one of `high`, `medium`, or `low`.
+- `agent_type`: identifies which of the five agents produced the output.
+- `ticker`: ticker being discussed; null for cross-portfolio outputs.
+- `event_type`: trigger for a ticker-level run; null for cross-portfolio outputs.
+- `summary`: agent-written summary; null only for an unflagged hypothesis.
+- `recommendation`: agent-written next-step framing; null for cross-portfolio outputs.
+- `confidence`: `high`, `medium`, or `low`; null for cross-portfolio outputs.
 - `price_at_update`: optional price snapshot.
 - `searched_web`: whether the agent used web search.
-- `metadata`: JSONB escape hatch for future agent-specific fields.
+- `metadata`: specialized fields used to reconstruct typed outputs. Hypothesis rows
+  store `flagged` and `recommended_next_scan_days`; cross-portfolio rows store
+  `correlations_flagged` and `tickers_analyzed`.
+
+`agent_type` is the persistence discriminator. Database reads use it to rebuild an
+`AgentOutput`, `HypothesisOutput`, or `CrossPortfolioOutput` without discarding
+specialized fields.
 
 ### `alerts`
 
@@ -102,6 +109,7 @@ The schema adds indexes for the app's expected query patterns:
 - `tickers(next_fetch_time)`: scheduler lookup for due ticker fetches.
 - `updates(user_id, timestamp desc)`: latest user updates.
 - `updates(user_id, ticker, timestamp desc)`: latest update for one user/ticker.
+- `updates(user_id, agent_type, timestamp desc)`: latest output from one agent.
 - `alerts(user_id, timestamp desc)`: alert history.
 - `alerts(user_id, ticker, timestamp desc)`: alert history for one user/ticker.
 
@@ -116,6 +124,8 @@ The checked values mirror `models/schemas.py`:
 - `motive`: `holding`, `short-term`, `watching`
 - `update_interval`: `daily`, `weekly`
 - `event_type`: `scheduled_update`, `sharp_move`, `motive_check`, `hypothesis_scan`
+- `agent_type`: `scheduled_review`, `sharp_move`, `motive`, `hypothesis`,
+  `cross_portfolio`
 - `confidence`: `high`, `medium`, `low`
 - `alert_type`: `sharp_move`, `motive_flag`, `hypothesis`, `cross_portfolio`, `scheduled`
 
