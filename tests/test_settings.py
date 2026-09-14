@@ -27,6 +27,10 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.sharp_move_check_interval_minutes, 15)
         self.assertEqual(settings.default_sharp_move_threshold, 0.01)
         self.assertEqual(settings.default_hypothesis_scan_days, 3)
+        self.assertEqual(settings.anthropic_model, "claude-sonnet-4-5")
+        self.assertEqual(settings.agent_model_max_tokens, 2048)
+        self.assertEqual(settings.agent_model_timeout_seconds, 60.0)
+        self.assertEqual(settings.agent_model_max_retries, 2)
         self.assertFalse(settings.langsmith_tracing)
         self.assertIsNone(settings.supabase_url)
         self.assertIsNone(settings.twelve_data_api_key)
@@ -38,6 +42,10 @@ class SettingsTests(unittest.TestCase):
                 "LOG_LEVEL": "debug",
                 "LANGSMITH_TRACING": "true",
                 "LANGSMITH_PROJECT": "sentient-tests",
+                "ANTHROPIC_MODEL": "claude-test-model",
+                "AGENT_MODEL_MAX_TOKENS": "4096",
+                "AGENT_MODEL_TIMEOUT_SECONDS": "45",
+                "AGENT_MODEL_MAX_RETRIES": "4",
                 "MAX_TICKER_DATAPOINTS": "200",
                 "PRICE_FETCH_INTERVAL_MINUTES": "30",
                 "TWELVE_DATA_REQUESTS_PER_MINUTE": "15",
@@ -53,6 +61,10 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.log_level, LogLevel.DEBUG)
         self.assertTrue(settings.langsmith_tracing)
         self.assertEqual(settings.langsmith_project, "sentient-tests")
+        self.assertEqual(settings.anthropic_model, "claude-test-model")
+        self.assertEqual(settings.agent_model_max_tokens, 4096)
+        self.assertEqual(settings.agent_model_timeout_seconds, 45.0)
+        self.assertEqual(settings.agent_model_max_retries, 4)
         self.assertEqual(settings.max_ticker_datapoints, 200)
         self.assertEqual(settings.price_fetch_interval_minutes, 30)
         self.assertEqual(settings.twelve_data_requests_per_minute, 15)
@@ -119,6 +131,7 @@ class SettingsTests(unittest.TestCase):
             {"TWELVE_DATA_REQUESTS_PER_MINUTE": "0"},
             {"SHARP_MOVE_CHECK_INTERVAL_MINUTES": "-1"},
             {"DEFAULT_HYPOTHESIS_SCAN_DAYS": "0"},
+            {"AGENT_MODEL_MAX_TOKENS": "0"},
         ]
 
         for env in invalid_values:
@@ -135,6 +148,15 @@ class SettingsTests(unittest.TestCase):
             with self.subTest(env=env):
                 with self.assertRaises(ValidationError):
                     load_settings(env)
+
+        with self.assertRaises(ValidationError):
+            load_settings({"AGENT_MODEL_MAX_RETRIES": "-1"})
+        with self.assertRaises(ValidationError):
+            load_settings({"AGENT_MODEL_TIMEOUT_SECONDS": "0"})
+
+    def test_anthropic_model_must_not_be_blank(self):
+        with self.assertRaises(ValidationError):
+            load_settings({"ANTHROPIC_MODEL": "   "})
 
     def test_twilio_whatsapp_sender_must_use_whatsapp_prefix(self):
         with self.assertRaises(ValidationError):

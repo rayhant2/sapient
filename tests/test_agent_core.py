@@ -1,11 +1,20 @@
 import unittest
 from datetime import datetime, timezone
 from typing import get_type_hints
+from unittest.mock import MagicMock, call, patch
 
 from langchain_core.messages import HumanMessage
 from langgraph.graph import END, START, StateGraph
+from pydantic import SecretStr
 
-from agents.core import TickerAgentState, build_ticker_agent_state
+from agents import core
+from agents.core import (
+    AgentModelInitializationError,
+    MissingUserApiKeyError,
+    TickerAgentState,
+    build_ticker_agent_state,
+)
+from data.database import DatabaseError
 from models.schemas import (
     AgentContext,
     EventType,
@@ -88,6 +97,100 @@ class TickerAgentStateTests(unittest.TestCase):
 
         self.assertEqual(result["context"].ticker, "NVDA")
         self.assertEqual(result["messages"][0].content, "NVDA")
+
+
+class UserModelFactoryTests(unittest.TestCase):
+    @patch("agents.core.ChatAnthropic")
+    @patch("agents.core.resolve_user_api_key")
+    def test_factory_uses_user_secret_and_configured_limits(self, resolve_key, model):
+        secret = SecretStr("sk-ant-user-secret")
+        database_client = MagicMock()
+        cipher = MagicMock()
+        resolve_key.return_value = secret
+        model.return_value = MagicMock(name="user-model")
+
+        created = core.create_user_model(
+            "user-1",
+            client=database_client,
+            cipher=cipher,
+        )
+
+        resolve_key.assert_called_once_with(
+            "user-1",
+            "anthropic",
+            client=database_client,
+            cipher=cipher,
+        )
+        model.assert_called_once_with(
+            model=core.settings.anthropic_model,
+            api_key=secret,
+            max_tokens=core.settings.agent_model_max_tokens,
+            timeout=core.settings.agent_model_timeout_seconds,
+            max_retries=core.settings.agent_model_max_retries,
+        )
+        self.assertIs(created, model.return_value)
+
+    @patch("agents.core.ChatAnthropic")
+    @patch("agents.core.resolve_user_api_key")
+    def test_factory_creates_a_fresh_model_for_each_run(self, resolve_key, model):
+        resolve_key.return_value = SecretStr("sk-ant-user-secret")
+        first_model = MagicMock(name="first-model")
+        second_model = MagicMock(name="second-model")
+        model.side_effect = [first_model, second_model]
+
+        first = core.create_user_model("user-1")
+        second = core.create_user_model("user-1")
+
+        self.assertIs(first, first_model)
+        self.assertIs(second, second_model)
+        expected_call = call("user-1", "anthropic", client=None, cipher=None)
+        self.assertEqual(resolve_key.call_args_list, [expected_call, expected_call])
+
+    @patch("agents.core.ChatAnthropic")
+    @patch("agents.core.resolve_user_api_key", return_value=None)
+    def test_factory_rejects_missing_user_key(self, resolve_key, model):
+        with self.assertRaisesRegex(MissingUserApiKeyError, "must add"):
+            core.create_user_model("user-1")
+
+        resolve_key.assert_called_once()
+        model.assert_not_called()
+
+    @patch("agents.core.ChatAnthropic")
+    @patch("agents.core.resolve_user_api_key")
+    def test_factory_wraps_credential_resolution_failure(self, resolve_key, model):
+        resolve_key.side_effect = DatabaseError("sensitive database detail")
+
+        with self.assertRaisesRegex(
+            AgentModelInitializationError,
+            "securely resolved",
+        ) as raised:
+            core.create_user_model("user-1")
+
+        self.assertNotIn("sensitive database detail", str(raised.exception))
+        self.assertIsNone(raised.exception.__cause__)
+        model.assert_not_called()
+
+    @patch("agents.core.ChatAnthropic")
+    @patch("agents.core.resolve_user_api_key")
+    def test_factory_wraps_model_initialization_failure(self, resolve_key, model):
+        resolve_key.return_value = SecretStr("sk-ant-user-secret")
+        model.side_effect = ValueError("secret-bearing SDK failure")
+
+        with self.assertRaisesRegex(
+            AgentModelInitializationError,
+            "could not be initialized",
+        ) as raised:
+            core.create_user_model("user-1")
+
+        self.assertNotIn("secret-bearing SDK failure", str(raised.exception))
+        self.assertIsNone(raised.exception.__cause__)
+
+    @patch("agents.core.resolve_user_api_key")
+    def test_factory_rejects_blank_user_before_database_access(self, resolve_key):
+        with self.assertRaisesRegex(ValueError, "user_id"):
+            core.create_user_model("   ")
+
+        resolve_key.assert_not_called()
 
 
 if __name__ == "__main__":

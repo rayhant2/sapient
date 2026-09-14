@@ -41,6 +41,10 @@ class Settings(BaseSettings):
 
     twelve_data_api_key: Optional[SecretStr] = None
     anthropic_api_key: Optional[SecretStr] = None
+    anthropic_model: str = "claude-sonnet-4-5"
+    agent_model_max_tokens: int = 2048
+    agent_model_timeout_seconds: float = 60.0
+    agent_model_max_retries: int = 2
 
     langsmith_tracing: bool = False
     langsmith_api_key: Optional[SecretStr] = None
@@ -73,6 +77,7 @@ class Settings(BaseSettings):
         "twelve_data_requests_per_minute",
         "sharp_move_check_interval_minutes",
         "default_hypothesis_scan_days",
+        "agent_model_max_tokens",
     )
     @classmethod
     def must_be_positive(cls, value: int) -> int:
@@ -87,6 +92,13 @@ class Settings(BaseSettings):
             raise ValueError("twelve_data_max_retries must be non-negative")
         return value
 
+    @field_validator("agent_model_max_retries")
+    @classmethod
+    def agent_retries_must_be_non_negative(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("agent_model_max_retries must be non-negative")
+        return value
+
     @field_validator(
         "twelve_data_rate_limit_buffer_seconds",
         "twelve_data_retry_base_delay_seconds",
@@ -96,6 +108,21 @@ class Settings(BaseSettings):
         if value < 0:
             raise ValueError("Scheduler delays must be non-negative")
         return value
+
+    @field_validator("agent_model_timeout_seconds")
+    @classmethod
+    def agent_timeout_must_be_positive(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("agent_model_timeout_seconds must be greater than zero")
+        return value
+
+    @field_validator("anthropic_model")
+    @classmethod
+    def anthropic_model_must_not_be_blank(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("anthropic_model must not be blank")
+        return normalized
 
     @field_validator("default_sharp_move_threshold")
     @classmethod
