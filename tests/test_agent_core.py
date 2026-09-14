@@ -11,11 +11,13 @@ from pydantic import SecretStr, ValidationError
 from agents import core
 from agents.core import (
     AgentModelInitializationError,
+    AgentContextAssemblyError,
     AgentToolConfigurationError,
     MissingUserApiKeyError,
     TickerAgentState,
     build_ticker_agent_tools,
     build_ticker_agent_state,
+    hydrate_ticker_agent_state,
 )
 from data.database import DatabaseError
 from models.schemas import (
@@ -105,6 +107,185 @@ class TickerAgentStateTests(unittest.TestCase):
 
         self.assertEqual(result["context"].ticker, "NVDA")
         self.assertEqual(result["messages"][0].content, "NVDA")
+
+
+class TickerAgentHydrationTests(unittest.TestCase):
+    def setUp(self):
+        self.context = agent_context()
+        self.client = MagicMock()
+
+    def output(
+        self,
+        *,
+        event_type: EventType,
+        timestamp: datetime,
+        summary: str,
+    ) -> AgentOutput:
+        return AgentOutput(
+            ticker="NVDA",
+            user_id="user-1",
+            event_type=event_type,
+            summary=summary,
+            recommendation="Continue monitoring.",
+            confidence=Confidence.MEDIUM,
+            timestamp=timestamp,
+        )
+
+    @patch("agents.core.get_latest_ticker_data")
+    @patch("agents.core.list_recent_alerts")
+    @patch("agents.core.list_recent_updates")
+    @patch("agents.core.get_latest_update")
+    def test_hydration_prioritizes_same_agent_and_reuses_context_market_data(
+        self,
+        get_update,
+        list_updates,
+        list_alerts,
+        get_market_history,
+    ):
+        same_agent = self.output(
+            event_type=EventType.SCHEDULED_UPDATE,
+            timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            summary="Previous scheduled review.",
+        )
+        newer_other_agent = self.output(
+            event_type=EventType.SHARP_MOVE,
+            timestamp=datetime(2026, 1, 2, tzinfo=timezone.utc),
+            summary="Newer sharp move.",
+        )
+        alert = Alert(
+            user_id="user-1",
+            ticker="NVDA",
+            alert_type=AlertType.SHARP_MOVE,
+            message="NVDA moved sharply.",
+        )
+        get_update.return_value = same_agent
+        list_updates.return_value = [newer_other_agent, same_agent]
+        list_alerts.return_value = [alert]
+
+        state = hydrate_ticker_agent_state(
+            self.context,
+            AgentType.SCHEDULED_REVIEW,
+            update_limit=5,
+            alert_limit=3,
+            client=self.client,
+        )
+
+        get_update.assert_called_once_with(
+            "user-1",
+            AgentType.SCHEDULED_REVIEW,
+            "NVDA",
+            client=self.client,
+        )
+        list_updates.assert_called_once_with(
+            "user-1",
+            ticker="NVDA",
+            limit=5,
+            client=self.client,
+        )
+        list_alerts.assert_called_once_with(
+            "user-1",
+            ticker="NVDA",
+            limit=3,
+            client=self.client,
+        )
+        self.assertEqual(
+            [output.summary for output in state["previous_updates"]],
+            ["Previous scheduled review.", "Newer sharp move."],
+        )
+        self.assertEqual(state["recent_alerts"], [alert])
+        self.assertIs(state["context"], self.context)
+        get_market_history.assert_not_called()
+
+    @patch("agents.core.list_recent_alerts", return_value=[])
+    @patch("agents.core.list_recent_updates", return_value=[])
+    @patch("agents.core.get_latest_update", return_value=None)
+    def test_hydration_supports_empty_memory(
+        self,
+        get_update,
+        list_updates,
+        list_alerts,
+    ):
+        state = hydrate_ticker_agent_state(
+            self.context,
+            AgentType.MOTIVE,
+            client=self.client,
+        )
+
+        self.assertEqual(state["previous_updates"], [])
+        self.assertEqual(state["recent_alerts"], [])
+        self.assertEqual(state["messages"], [])
+        self.assertIsNone(state["output"])
+        get_update.assert_called_once()
+        list_updates.assert_called_once()
+        list_alerts.assert_called_once()
+
+    @patch("agents.core.get_latest_update")
+    def test_hydration_sanitizes_database_failures(self, get_update):
+        get_update.side_effect = DatabaseError("private database detail")
+
+        with self.assertRaisesRegex(
+            AgentContextAssemblyError,
+            "could not be loaded",
+        ) as raised:
+            hydrate_ticker_agent_state(
+                self.context,
+                AgentType.SHARP_MOVE,
+                client=self.client,
+            )
+
+        self.assertNotIn("private database detail", str(raised.exception))
+        self.assertIsNone(raised.exception.__cause__)
+
+    @patch("agents.core.list_recent_alerts", return_value=[])
+    @patch("agents.core.list_recent_updates")
+    @patch("agents.core.get_latest_update")
+    def test_hydration_never_exceeds_update_limit(
+        self,
+        get_update,
+        list_updates,
+        list_alerts,
+    ):
+        same_agent = self.output(
+            event_type=EventType.SCHEDULED_UPDATE,
+            timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            summary="Same agent.",
+        )
+        other_agent = self.output(
+            event_type=EventType.SHARP_MOVE,
+            timestamp=datetime(2026, 1, 2, tzinfo=timezone.utc),
+            summary="Other agent.",
+        )
+        get_update.return_value = same_agent
+        list_updates.return_value = [other_agent]
+
+        state = hydrate_ticker_agent_state(
+            self.context,
+            AgentType.SCHEDULED_REVIEW,
+            update_limit=1,
+            client=self.client,
+        )
+
+        self.assertEqual(state["previous_updates"], [same_agent])
+        list_alerts.assert_called_once()
+
+    @patch("agents.core.get_latest_update")
+    def test_hydration_validates_inputs_before_database_access(self, get_update):
+        invalid_cases = [
+            {"agent_type": AgentType.CROSS_PORTFOLIO},
+            {"agent_type": AgentType.SHARP_MOVE, "update_limit": 0},
+            {"agent_type": AgentType.SHARP_MOVE, "alert_limit": 21},
+        ]
+
+        for arguments in invalid_cases:
+            with self.subTest(arguments=arguments):
+                with self.assertRaises(ValueError):
+                    hydrate_ticker_agent_state(
+                        self.context,
+                        client=self.client,
+                        **arguments,
+                    )
+
+        get_update.assert_not_called()
 
 
 class UserModelFactoryTests(unittest.TestCase):

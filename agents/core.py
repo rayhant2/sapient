@@ -52,6 +52,10 @@ class AgentToolConfigurationError(RuntimeError):
     """Raised when tools cannot be safely bound to an agent context."""
 
 
+class AgentContextAssemblyError(RuntimeError):
+    """Raised when an agent's bounded memory cannot be safely assembled."""
+
+
 class AgentToolInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -125,6 +129,74 @@ def build_ticker_agent_state(context: AgentContext) -> TickerAgentState:
         "recent_alerts": [],
         "output": None,
     }
+
+
+def _agent_memory_limit(value: int, field_name: str) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 1 <= value <= MAX_AGENT_MEMORY_RESULTS
+    ):
+        raise ValueError(
+            f"{field_name} must be an integer between 1 and "
+            f"{MAX_AGENT_MEMORY_RESULTS}."
+        )
+    return value
+
+
+def hydrate_ticker_agent_state(
+    context: AgentContext,
+    agent_type: AgentType | str,
+    *,
+    update_limit: int = 5,
+    alert_limit: int = 5,
+    client: Client | None = None,
+) -> TickerAgentState:
+    """Build state with bounded, user-scoped memory for one ticker agent run."""
+    user_id, ticker = _bound_ticker_identity(context)
+    normalized_agent_type = AgentType(agent_type)
+    if normalized_agent_type == AgentType.CROSS_PORTFOLIO:
+        raise ValueError("cross_portfolio does not use ticker agent state.")
+    validated_update_limit = _agent_memory_limit(update_limit, "update_limit")
+    validated_alert_limit = _agent_memory_limit(alert_limit, "alert_limit")
+
+    try:
+        latest_same_agent = get_latest_update(
+            user_id,
+            normalized_agent_type,
+            ticker,
+            client=client,
+        )
+        recent_updates = list_recent_updates(
+            user_id,
+            ticker=ticker,
+            limit=validated_update_limit,
+            client=client,
+        )
+        recent_alert_history = list_recent_alerts(
+            user_id,
+            ticker=ticker,
+            limit=validated_alert_limit,
+            client=client,
+        )
+    except Exception:
+        raise AgentContextAssemblyError(
+            "Agent memory could not be loaded for this position."
+        ) from None
+
+    previous_updates: list[TickerAgentOutput] = []
+    if latest_same_agent is not None:
+        previous_updates.append(latest_same_agent)
+    for output in recent_updates:
+        if len(previous_updates) >= validated_update_limit:
+            break
+        if output not in previous_updates:
+            previous_updates.append(output)
+
+    state = build_ticker_agent_state(context)
+    state["previous_updates"] = previous_updates
+    state["recent_alerts"] = recent_alert_history
+    return state
 
 
 def create_user_model(
