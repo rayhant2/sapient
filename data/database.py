@@ -553,6 +553,10 @@ def _agent_output_payload(output: StoredAgentOutput) -> dict[str, Any]:
         for key, value in payload.items()
         if key not in allowed_columns and value is not None
     }
+    if not metadata.get("sources"):
+        metadata.pop("sources", None)
+    if metadata.get("web_search_requests") == 0:
+        metadata.pop("web_search_requests", None)
     row = {key: value for key, value in payload.items() if key in allowed_columns}
     row["ticker"] = _ticker_symbol(row["ticker"])
     row["agent_type"] = agent_type.value
@@ -594,6 +598,8 @@ def _parse_agent_output_row(row: dict[str, Any]) -> StoredAgentOutput:
             "searched_web",
         )
     }
+    payload["sources"] = metadata.get("sources", [])
+    payload["web_search_requests"] = metadata.get("web_search_requests", 0)
     if agent_type == AgentType.HYPOTHESIS:
         payload.update(
             flagged=metadata.get("flagged", False),

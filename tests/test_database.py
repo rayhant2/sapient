@@ -19,6 +19,7 @@ from models.schemas import (
     HypothesisOutput,
     Motive,
     OHLCVPoint,
+    ResearchSource,
     Subscription,
     Ticker,
     UpdateInterval,
@@ -448,6 +449,51 @@ class DatabaseTests(unittest.TestCase):
         self.assertIsNone(payload.get("summary"))
         self.assertIsInstance(returned, HypothesisOutput)
         self.assertFalse(returned.flagged)
+
+    def test_agent_output_round_trip_preserves_web_research_metadata(self):
+        row = update_row()
+        row["metadata"] = {
+            "sources": [
+                {
+                    "title": "Company filing",
+                    "url": "https://example.com/filing",
+                    "page_age": "2026-01-02",
+                    "cited_text": "The company announced an update.",
+                }
+            ],
+            "web_search_requests": 1,
+        }
+        client = FakeClient({"updates": [row]})
+        output = AgentOutput(
+            ticker="NVDA",
+            user_id="user-1",
+            event_type=EventType.SHARP_MOVE,
+            summary="NVDA moved sharply.",
+            recommendation="Review the position.",
+            confidence=Confidence.MEDIUM,
+            price_at_update=500.25,
+            searched_web=True,
+            sources=[
+                ResearchSource(
+                    title="Company filing",
+                    url="https://example.com/filing",
+                    page_age="2026-01-02",
+                    cited_text="The company announced an update.",
+                )
+            ],
+            web_search_requests=1,
+        )
+
+        returned = database.insert_agent_output(output, client=client)
+
+        payload = client.tables[0].calls[0][1][0]
+        self.assertEqual(payload["metadata"]["web_search_requests"], 1)
+        self.assertEqual(
+            payload["metadata"]["sources"][0]["url"],
+            "https://example.com/filing",
+        )
+        self.assertEqual(returned.sources, output.sources)
+        self.assertEqual(returned.web_search_requests, 1)
 
     def test_cross_portfolio_output_round_trip(self):
         client = FakeClient({"updates": [cross_portfolio_row()]})

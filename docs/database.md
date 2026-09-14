@@ -81,7 +81,8 @@ Important fields:
 - `searched_web`: whether the agent used web search.
 - `metadata`: specialized fields used to reconstruct typed outputs. Hypothesis rows
   store `flagged` and `recommended_next_scan_days`; cross-portfolio rows store
-  `correlations_flagged` and `tickers_analyzed`.
+  `correlations_flagged` and `tickers_analyzed`; researched ticker outputs store
+  normalized `sources` and `web_search_requests`.
 
 `agent_type` is the persistence discriminator. Database reads use it to rebuild an
 `AgentOutput`, `HypothesisOutput`, or `CrossPortfolioOutput` without discarding

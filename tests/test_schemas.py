@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from models.schemas import (
     AgentContext,
+    AgentOutput,
     AgentType,
     Alert,
     AlertType,
@@ -15,6 +16,7 @@ from models.schemas import (
     Motive,
     OHLCVPoint,
     PortfolioContext,
+    ResearchSource,
     Subscription,
     TickerRegistry,
     UpdateInterval,
@@ -152,6 +154,33 @@ class SchemaTests(unittest.TestCase):
 
         self.assertEqual(second_user.preferences, {})
         self.assertEqual(second_alert.trigger_details, {})
+
+        first_output = AgentOutput(
+            ticker="NVDA",
+            user_id="user-1",
+            event_type=EventType.SHARP_MOVE,
+            summary="Summary",
+            recommendation="Monitor",
+            confidence=Confidence.MEDIUM,
+        )
+        second_output = first_output.model_copy(deep=True)
+        first_output.sources.append(
+            ResearchSource(title="Source", url="https://example.com")
+        )
+
+        self.assertEqual(second_output.sources, [])
+
+    def test_agent_output_validates_web_search_request_count(self):
+        with self.assertRaises(ValidationError):
+            AgentOutput(
+                ticker="NVDA",
+                user_id="user-1",
+                event_type=EventType.SHARP_MOVE,
+                summary="Summary",
+                recommendation="Monitor",
+                confidence=Confidence.MEDIUM,
+                web_search_requests=-1,
+            )
 
     def test_portfolio_context_properties(self):
         nvda = make_agent_context(user_id="user-1", ticker="NVDA")

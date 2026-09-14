@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     agent_model_max_tokens: int = 2048
     agent_model_timeout_seconds: float = 60.0
     agent_model_max_retries: int = 2
+    agent_web_search_max_uses: int = 2
+    agent_web_search_max_continuations: int = 1
 
     langsmith_tracing: bool = False
     langsmith_api_key: Optional[SecretStr] = None
@@ -78,6 +80,7 @@ class Settings(BaseSettings):
         "sharp_move_check_interval_minutes",
         "default_hypothesis_scan_days",
         "agent_model_max_tokens",
+        "agent_web_search_max_uses",
     )
     @classmethod
     def must_be_positive(cls, value: int) -> int:
@@ -97,6 +100,22 @@ class Settings(BaseSettings):
     def agent_retries_must_be_non_negative(cls, value: int) -> int:
         if value < 0:
             raise ValueError("agent_model_max_retries must be non-negative")
+        return value
+
+    @field_validator("agent_web_search_max_uses")
+    @classmethod
+    def web_search_uses_must_be_bounded(cls, value: int) -> int:
+        if not 1 <= value <= 5:
+            raise ValueError("agent_web_search_max_uses must be between 1 and 5")
+        return value
+
+    @field_validator("agent_web_search_max_continuations")
+    @classmethod
+    def web_search_continuations_must_be_bounded(cls, value: int) -> int:
+        if not 0 <= value <= 2:
+            raise ValueError(
+                "agent_web_search_max_continuations must be between 0 and 2"
+            )
         return value
 
     @field_validator(

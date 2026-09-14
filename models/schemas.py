@@ -73,6 +73,13 @@ class Confidence(str, Enum):
     LOW = "low"
 
 
+class ResearchSource(BaseModel):
+    title: str
+    url: str
+    page_age: Optional[str] = None
+    cited_text: Optional[str] = None
+
+
 class AlertType(str, Enum):
     SHARP_MOVE = "sharp_move" # (1)
     MOTIVE_FLAG = "motive_flag" # (3) if stated motive for stock seems unrealistic at the moment
@@ -223,6 +230,8 @@ class AgentOutput(BaseModel):
     timestamp: datetime = Field(default_factory=utc_now)
     price_at_update: Optional[float] = None
     searched_web: bool = False
+    sources: list[ResearchSource] = Field(default_factory=list)
+    web_search_requests: int = Field(default=0, ge=0)
 
 class CrossPortfolioOutput(BaseModel):
     user_id: str
