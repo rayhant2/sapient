@@ -110,8 +110,29 @@ The schema adds indexes for the app's expected query patterns:
 - `updates(user_id, timestamp desc)`: latest user updates.
 - `updates(user_id, ticker, timestamp desc)`: latest update for one user/ticker.
 - `updates(user_id, agent_type, timestamp desc)`: latest output from one agent.
+- `updates(user_id, ticker, agent_type, timestamp desc)`: filtered per-position
+  agent history.
 - `alerts(user_id, timestamp desc)`: alert history.
 - `alerts(user_id, ticker, timestamp desc)`: alert history for one user/ticker.
+- `alerts(user_id, ticker, alert_type, timestamp desc)`: filtered notification
+  history.
+
+## Memory Retrieval
+
+Agent memory reads stay in `data/database.py` and always require a `user_id`:
+
+- `get_latest_update(...)` returns the newest typed output for an agent, optionally
+  scoped to one ticker.
+- `list_recent_updates(...)` returns newest-first typed outputs with optional ticker,
+  agent, and UTC-aware `since` filters.
+- `list_recent_alerts(...)` provides the equivalent bounded alert history.
+- `list_latest_portfolio_updates(...)` loads a user's subscriptions, performs one
+  bounded update query, and returns the newest output found for each subscribed
+  ticker.
+
+Public history queries accept between 1 and 100 rows. Portfolio retrieval scans at
+most 20 recent rows per subscribed ticker, capped at 500 total rows, before
+deduplicating in memory. Timestamps used for `since` filters must be timezone-aware.
 
 ## Constraint Strategy
 

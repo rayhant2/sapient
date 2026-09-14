@@ -13,6 +13,7 @@ from models.schemas import (
     AgentOutput,
     AgentType,
     Alert,
+    AlertType,
     CrossPortfolioOutput,
     EventType,
     HypothesisOutput,
@@ -39,6 +40,10 @@ class MissingSupabaseConfigError(DatabaseError):
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 StoredAgentOutput: TypeAlias = AgentOutput | HypothesisOutput | CrossPortfolioOutput
+
+MAX_HISTORY_QUERY_LIMIT = 100
+MAX_PORTFOLIO_UPDATE_SCAN = 500
+PORTFOLIO_UPDATE_SCAN_PER_TICKER = 20
 
 _AGENT_TYPE_BY_EVENT = {
     EventType.SCHEDULED_UPDATE: AgentType.SCHEDULED_REVIEW,
@@ -124,6 +129,20 @@ def _execute(builder: Any) -> Any:
 
 def _ticker_symbol(ticker: str) -> str:
     return ticker.upper()
+
+
+def _history_limit(limit: int, *, maximum: int = MAX_HISTORY_QUERY_LIMIT) -> int:
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= maximum:
+        raise ValueError(f"limit must be an integer between 1 and {maximum}.")
+    return limit
+
+
+def _since_timestamp(since: datetime | None) -> str | None:
+    if since is None:
+        return None
+    if since.tzinfo is None or since.utcoffset() is None:
+        raise ValueError("since must be timezone-aware.")
+    return since.astimezone(timezone.utc).isoformat()
 
 
 def _parse_datetime(value: Any, field_name: str) -> datetime:
@@ -610,33 +629,105 @@ def insert_agent_output(
     return _parse_agent_output_row(row)
 
 
-def list_updates_for_user(
-    user_id: str, limit: int = 50, *, client: Optional[Client] = None
-) -> list[StoredAgentOutput]:
-    response = _execute(
+def get_latest_update(
+    user_id: str,
+    agent_type: AgentType | str,
+    ticker: str | None = None,
+    *,
+    client: Optional[Client] = None,
+) -> StoredAgentOutput | None:
+    normalized_agent_type = AgentType(agent_type)
+    query = (
         _client(client)
         .table("updates")
         .select("*")
         .eq("user_id", user_id)
-        .order("timestamp", desc=True)
-        .limit(limit)
+        .eq("agent_type", normalized_agent_type.value)
+    )
+    if ticker is not None:
+        query = query.eq("ticker", _ticker_symbol(ticker))
+
+    response = _execute(
+        query.order("timestamp", desc=True).order("id", desc=True).limit(1)
+    )
+    row = _single_row(response.data)
+    return _parse_agent_output_row(row) if row else None
+
+
+def list_recent_updates(
+    user_id: str,
+    *,
+    ticker: str | None = None,
+    agent_type: AgentType | str | None = None,
+    limit: int = 10,
+    since: datetime | None = None,
+    client: Optional[Client] = None,
+) -> list[StoredAgentOutput]:
+    validated_limit = _history_limit(limit)
+    normalized_since = _since_timestamp(since)
+    query = _client(client).table("updates").select("*").eq("user_id", user_id)
+    if ticker is not None:
+        query = query.eq("ticker", _ticker_symbol(ticker))
+    if agent_type is not None:
+        query = query.eq("agent_type", AgentType(agent_type).value)
+    if normalized_since is not None:
+        query = query.gte("timestamp", normalized_since)
+
+    response = _execute(
+        query.order("timestamp", desc=True)
+        .order("id", desc=True)
+        .limit(validated_limit)
     )
     return _parse_agent_output_list(response.data)
+
+
+def list_latest_portfolio_updates(
+    user_id: str, *, client: Optional[Client] = None
+) -> list[StoredAgentOutput]:
+    database_client = _client(client)
+    subscriptions = list_subscriptions_for_user(user_id, client=database_client)
+    subscribed_tickers = {subscription.ticker for subscription in subscriptions}
+    if not subscribed_tickers:
+        return []
+
+    scan_limit = min(
+        MAX_PORTFOLIO_UPDATE_SCAN,
+        max(len(subscribed_tickers), len(subscribed_tickers) * PORTFOLIO_UPDATE_SCAN_PER_TICKER),
+    )
+    response = _execute(
+        database_client.table("updates")
+        .select("*")
+        .eq("user_id", user_id)
+        .in_("ticker", sorted(subscribed_tickers))
+        .order("timestamp", desc=True)
+        .order("id", desc=True)
+        .limit(scan_limit)
+    )
+    recent_outputs = _parse_agent_output_list(response.data)
+
+    latest_by_ticker: dict[str, StoredAgentOutput] = {}
+    for output in recent_outputs:
+        ticker = getattr(output, "ticker", None)
+        if ticker is not None and ticker not in latest_by_ticker:
+            latest_by_ticker[ticker] = output
+    return list(latest_by_ticker.values())
+
+
+def list_updates_for_user(
+    user_id: str, limit: int = 50, *, client: Optional[Client] = None
+) -> list[StoredAgentOutput]:
+    return list_recent_updates(user_id, limit=limit, client=client)
 
 
 def list_updates_for_user_ticker(
     user_id: str, ticker: str, limit: int = 20, *, client: Optional[Client] = None
 ) -> list[StoredAgentOutput]:
-    response = _execute(
-        _client(client)
-        .table("updates")
-        .select("*")
-        .eq("user_id", user_id)
-        .eq("ticker", _ticker_symbol(ticker))
-        .order("timestamp", desc=True)
-        .limit(limit)
+    return list_recent_updates(
+        user_id,
+        ticker=ticker,
+        limit=limit,
+        client=client,
     )
-    return _parse_agent_output_list(response.data)
 
 
 def insert_alert(alert: Alert, *, client: Optional[Client] = None) -> Alert:
@@ -651,27 +742,42 @@ def insert_alert(alert: Alert, *, client: Optional[Client] = None) -> Alert:
 def list_alerts_for_user(
     user_id: str, limit: int = 50, *, client: Optional[Client] = None
 ) -> list[Alert]:
-    response = _execute(
-        _client(client)
-        .table("alerts")
-        .select("*")
-        .eq("user_id", user_id)
-        .order("timestamp", desc=True)
-        .limit(limit)
-    )
-    return _parse_model_list(Alert, response.data)
+    return list_recent_alerts(user_id, limit=limit, client=client)
 
 
 def list_alerts_for_user_ticker(
     user_id: str, ticker: str, limit: int = 20, *, client: Optional[Client] = None
 ) -> list[Alert]:
+    return list_recent_alerts(
+        user_id,
+        ticker=ticker,
+        limit=limit,
+        client=client,
+    )
+
+
+def list_recent_alerts(
+    user_id: str,
+    *,
+    ticker: str | None = None,
+    alert_type: AlertType | str | None = None,
+    limit: int = 10,
+    since: datetime | None = None,
+    client: Optional[Client] = None,
+) -> list[Alert]:
+    validated_limit = _history_limit(limit)
+    normalized_since = _since_timestamp(since)
+    query = _client(client).table("alerts").select("*").eq("user_id", user_id)
+    if ticker is not None:
+        query = query.eq("ticker", _ticker_symbol(ticker))
+    if alert_type is not None:
+        query = query.eq("alert_type", AlertType(alert_type).value)
+    if normalized_since is not None:
+        query = query.gte("timestamp", normalized_since)
+
     response = _execute(
-        _client(client)
-        .table("alerts")
-        .select("*")
-        .eq("user_id", user_id)
-        .eq("ticker", _ticker_symbol(ticker))
-        .order("timestamp", desc=True)
-        .limit(limit)
+        query.order("timestamp", desc=True)
+        .order("id", desc=True)
+        .limit(validated_limit)
     )
     return _parse_model_list(Alert, response.data)

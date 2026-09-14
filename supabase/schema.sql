@@ -211,11 +211,17 @@ create index if not exists idx_updates_user_ticker_timestamp_desc
 create index if not exists idx_updates_user_agent_timestamp_desc
     on public.updates(user_id, agent_type, "timestamp" desc);
 
+create index if not exists idx_updates_user_ticker_agent_timestamp_desc
+    on public.updates(user_id, ticker, agent_type, "timestamp" desc);
+
 create index if not exists idx_alerts_user_timestamp_desc
     on public.alerts(user_id, "timestamp" desc);
 
 create index if not exists idx_alerts_user_ticker_timestamp_desc
     on public.alerts(user_id, ticker, "timestamp" desc);
+
+create index if not exists idx_alerts_user_ticker_type_timestamp_desc
+    on public.alerts(user_id, ticker, alert_type, "timestamp" desc);
 
 create or replace function public.set_updated_at()
 returns trigger

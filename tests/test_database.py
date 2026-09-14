@@ -58,6 +58,12 @@ class FakeTable:
     def lte(self, column, value):
         return self._record("lte", column, value)
 
+    def gte(self, column, value):
+        return self._record("gte", column, value)
+
+    def in_(self, column, values):
+        return self._record("in_", column, values)
+
     def order(self, column, **kwargs):
         return self._record("order", column, **kwargs)
 
@@ -509,6 +515,105 @@ class DatabaseTests(unittest.TestCase):
         self.assertIsInstance(outputs[1], HypothesisOutput)
         self.assertIn(("eq", ("ticker", "NVDA"), {}), client.tables[0].calls)
 
+    def test_get_latest_update_filters_by_user_agent_and_ticker(self):
+        client = FakeClient({"updates": [[update_row()]]})
+
+        output = database.get_latest_update(
+            "user-1",
+            AgentType.SHARP_MOVE,
+            "nvda",
+            client=client,
+        )
+
+        self.assertIsInstance(output, AgentOutput)
+        calls = client.tables[0].calls
+        self.assertIn(("eq", ("user_id", "user-1"), {}), calls)
+        self.assertIn(("eq", ("agent_type", "sharp_move"), {}), calls)
+        self.assertIn(("eq", ("ticker", "NVDA"), {}), calls)
+        self.assertIn(("limit", (1,), {}), calls)
+
+    def test_get_latest_update_returns_none_when_history_is_empty(self):
+        client = FakeClient({"updates": []})
+
+        output = database.get_latest_update(
+            "user-1",
+            AgentType.SCHEDULED_REVIEW,
+            client=client,
+        )
+
+        self.assertIsNone(output)
+
+    def test_list_recent_updates_applies_optional_filters(self):
+        client = FakeClient({"updates": [[hypothesis_row()]]})
+        since = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        outputs = database.list_recent_updates(
+            "user-1",
+            ticker="nvda",
+            agent_type=AgentType.HYPOTHESIS,
+            limit=5,
+            since=since,
+            client=client,
+        )
+
+        self.assertIsInstance(outputs[0], HypothesisOutput)
+        calls = client.tables[0].calls
+        self.assertIn(("eq", ("user_id", "user-1"), {}), calls)
+        self.assertIn(("eq", ("ticker", "NVDA"), {}), calls)
+        self.assertIn(("eq", ("agent_type", "hypothesis"), {}), calls)
+        self.assertIn(("gte", ("timestamp", since.isoformat()), {}), calls)
+        self.assertIn(("limit", (5,), {}), calls)
+
+    def test_history_queries_reject_invalid_limits_and_naive_since(self):
+        client = FakeClient({})
+
+        with self.assertRaises(ValueError):
+            database.list_recent_updates("user-1", limit=0, client=client)
+        with self.assertRaises(ValueError):
+            database.list_recent_alerts("user-1", limit=101, client=client)
+        with self.assertRaises(ValueError):
+            database.list_recent_updates(
+                "user-1",
+                since=datetime(2026, 1, 1),
+                client=client,
+            )
+
+        self.assertEqual(client.tables, [])
+
+    def test_list_latest_portfolio_updates_returns_one_per_subscription(self):
+        amd_subscription = subscription_row() | {"ticker": "AMD"}
+        latest_nvda = update_row() | {
+            "timestamp": "2026-01-03T00:00:00+00:00",
+        }
+        older_nvda = update_row() | {
+            "timestamp": "2026-01-01T00:00:00+00:00",
+        }
+        latest_amd = update_row() | {
+            "ticker": "AMD",
+            "timestamp": "2026-01-02T00:00:00+00:00",
+        }
+        client = FakeClient(
+            {
+                "subscriptions": [[subscription_row(), amd_subscription]],
+                "updates": [[latest_nvda, latest_amd, older_nvda]],
+            }
+        )
+
+        outputs = database.list_latest_portfolio_updates("user-1", client=client)
+
+        self.assertEqual([output.ticker for output in outputs], ["NVDA", "AMD"])
+        update_calls = client.tables[1].calls
+        self.assertIn(("eq", ("user_id", "user-1"), {}), update_calls)
+        self.assertIn(("in_", ("ticker", ["AMD", "NVDA"]), {}), update_calls)
+
+    def test_list_latest_portfolio_updates_skips_query_without_subscriptions(self):
+        client = FakeClient({"subscriptions": []})
+
+        outputs = database.list_latest_portfolio_updates("user-1", client=client)
+
+        self.assertEqual(outputs, [])
+        self.assertEqual(len(client.tables), 1)
+
     def test_insert_alert_returns_alert_model(self):
         client = FakeClient({"alerts": [alert_row()]})
         alert = Alert(
@@ -523,6 +628,27 @@ class DatabaseTests(unittest.TestCase):
 
         self.assertEqual(inserted.alert_type, AlertType.SHARP_MOVE)
         self.assertEqual(client.tables[0].calls[0][1][0]["ticker"], "NVDA")
+
+    def test_list_recent_alerts_applies_optional_filters(self):
+        client = FakeClient({"alerts": [[alert_row()]]})
+        since = datetime(2025, 12, 31, 19, tzinfo=timezone.utc)
+
+        alerts = database.list_recent_alerts(
+            "user-1",
+            ticker="nvda",
+            alert_type=AlertType.SHARP_MOVE,
+            limit=7,
+            since=since,
+            client=client,
+        )
+
+        self.assertEqual(alerts, [Alert.model_validate(alert_row())])
+        calls = client.tables[0].calls
+        self.assertIn(("eq", ("user_id", "user-1"), {}), calls)
+        self.assertIn(("eq", ("ticker", "NVDA"), {}), calls)
+        self.assertIn(("eq", ("alert_type", "sharp_move"), {}), calls)
+        self.assertIn(("gte", ("timestamp", since.isoformat()), {}), calls)
+        self.assertIn(("limit", (7,), {}), calls)
 
     def test_single_row_rejects_multiple_rows(self):
         with self.assertRaises(database.DatabaseError):
