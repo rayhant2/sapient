@@ -7,6 +7,9 @@ requires-python = ">=3.12"
 dependencies = [
     "apscheduler>=3.11.3",
     "cryptography>=49.0.0",
+    "langchain-anthropic>=1.7.2",
+    "langgraph>=1.2.11",
+    "langsmith>=0.12.4",
     "pydantic>=2.13.4",
     "pydantic-settings>=2.14.2",
     "supabase>=2.31.0",
