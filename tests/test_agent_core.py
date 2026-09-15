@@ -11,16 +11,21 @@ from pydantic import SecretStr, ValidationError
 from agents import core
 from agents.core import (
     AgentModelInitializationError,
+    AgentOutputValidationError,
     AgentContextAssemblyError,
     AgentToolConfigurationError,
     MissingUserApiKeyError,
     TickerAgentState,
     WebResearchError,
     WebResearchFocus,
+    bind_structured_output,
     bind_web_search,
     build_ticker_agent_tools,
     build_ticker_agent_state,
     hydrate_ticker_agent_state,
+    finalize_cross_portfolio_output,
+    finalize_ticker_output,
+    get_structured_output_schema,
     perform_web_research,
     web_research_state_update,
 )
@@ -35,6 +40,7 @@ from models.schemas import (
     EventType,
     Motive,
     OHLCVPoint,
+    PortfolioContext,
     ResearchSource,
     Subscription,
     UpdateInterval,
@@ -749,6 +755,212 @@ class WebResearchTests(unittest.TestCase):
         self.assertEqual(update["messages"], [response])
         self.assertEqual(update["research_sources"], result.sources)
         self.assertEqual(update["web_search_requests"], 1)
+
+
+class StructuredOutputTests(unittest.TestCase):
+    def setUp(self):
+        self.context = agent_context()
+        self.state = build_ticker_agent_state(self.context)
+
+    def test_schema_selection_exposes_only_model_owned_fields(self):
+        standard_schema = get_structured_output_schema(AgentType.SCHEDULED_REVIEW)
+        hypothesis_schema = get_structured_output_schema(AgentType.HYPOTHESIS)
+        portfolio_schema = get_structured_output_schema(AgentType.CROSS_PORTFOLIO)
+
+        trusted_fields = {
+            "user_id",
+            "ticker",
+            "event_type",
+            "price_at_update",
+            "searched_web",
+            "sources",
+            "web_search_requests",
+        }
+        for schema in (standard_schema, hypothesis_schema, portfolio_schema):
+            self.assertTrue(trusted_fields.isdisjoint(schema.model_fields))
+        self.assertEqual(
+            set(standard_schema.model_fields),
+            {"summary", "recommendation", "confidence"},
+        )
+        self.assertIn("flagged", hypothesis_schema.model_fields)
+        self.assertEqual(
+            set(portfolio_schema.model_fields),
+            {"summary", "correlations_flagged"},
+        )
+
+    def test_bind_structured_output_uses_native_json_schema(self):
+        model = MagicMock()
+        runnable = MagicMock()
+        model.with_structured_output.return_value = runnable
+
+        bound = bind_structured_output(model, AgentType.HYPOTHESIS)
+
+        self.assertIs(bound, runnable)
+        model.with_structured_output.assert_called_once_with(
+            core.HypothesisAnalysisDraft,
+            method="json_schema",
+            include_raw=False,
+        )
+
+    def test_finalize_ticker_output_injects_trusted_fields_and_research(self):
+        source = ResearchSource(
+            title="Company filing",
+            url="https://example.com/filing",
+        )
+        self.state["research_sources"] = [source, source]
+        self.state["web_search_requests"] = 1
+
+        output = finalize_ticker_output(
+            self.state,
+            AgentType.SCHEDULED_REVIEW,
+            {
+                "summary": "  Position remains stable.  ",
+                "recommendation": " Continue monitoring. ",
+                "confidence": "medium",
+            },
+        )
+
+        self.assertIsInstance(output, AgentOutput)
+        self.assertEqual(output.user_id, "user-1")
+        self.assertEqual(output.ticker, "NVDA")
+        self.assertEqual(output.event_type, EventType.SCHEDULED_UPDATE)
+        self.assertEqual(output.price_at_update, self.context.current_price)
+        self.assertEqual(output.summary, "Position remains stable.")
+        self.assertTrue(output.searched_web)
+        self.assertEqual(output.sources, [source])
+        self.assertEqual(output.web_search_requests, 1)
+
+    def test_model_cannot_supply_trusted_ticker_fields(self):
+        with self.assertRaisesRegex(
+            AgentOutputValidationError,
+            "invalid structured analysis",
+        ):
+            finalize_ticker_output(
+                self.state,
+                AgentType.SCHEDULED_REVIEW,
+                {
+                    "summary": "Position remains stable.",
+                    "recommendation": "Continue monitoring.",
+                    "confidence": "medium",
+                    "user_id": "user-2",
+                    "ticker": "AMD",
+                },
+            )
+
+    def test_finalize_hypothesis_output_enforces_flag_contract(self):
+        hypothesis_context = self.context.model_copy(
+            update={"event_type": EventType.HYPOTHESIS_SCAN}
+        )
+        state = build_ticker_agent_state(hypothesis_context)
+
+        output = finalize_ticker_output(
+            state,
+            AgentType.HYPOTHESIS,
+            {
+                "summary": "Volume is building near resistance.",
+                "recommendation": "Recheck after the next session.",
+                "confidence": "low",
+                "flagged": True,
+                "recommended_next_scan_days": 1,
+            },
+        )
+
+        self.assertIsInstance(output, core.HypothesisOutput)
+        self.assertTrue(output.flagged)
+        self.assertEqual(output.recommended_next_scan_days, 1)
+
+        unflagged = finalize_ticker_output(
+            state,
+            AgentType.HYPOTHESIS,
+            {
+                "summary": None,
+                "recommendation": "",
+                "confidence": "medium",
+                "flagged": False,
+                "recommended_next_scan_days": 3,
+            },
+        )
+
+        self.assertFalse(unflagged.flagged)
+        self.assertIsNone(unflagged.summary)
+        self.assertEqual(unflagged.recommended_next_scan_days, 3)
+
+        with self.assertRaises(AgentOutputValidationError):
+            finalize_ticker_output(
+                state,
+                AgentType.HYPOTHESIS,
+                {
+                    "summary": None,
+                    "recommendation": "",
+                    "confidence": "low",
+                    "flagged": True,
+                    "recommended_next_scan_days": 1,
+                },
+            )
+
+    def test_agent_type_must_match_trusted_event(self):
+        with self.assertRaisesRegex(AgentOutputValidationError, "does not match"):
+            finalize_ticker_output(
+                self.state,
+                AgentType.SHARP_MOVE,
+                {
+                    "summary": "Price moved.",
+                    "recommendation": "Review the move.",
+                    "confidence": "high",
+                },
+            )
+
+    def test_cross_portfolio_output_uses_trusted_positions(self):
+        amd_context = agent_context().model_copy(
+            update={
+                "ticker": "AMD",
+                "subscription": agent_context().subscription.model_copy(
+                    update={"ticker": "AMD"}
+                ),
+            }
+        )
+        portfolio = PortfolioContext(
+            user_id="user-1",
+            positions=[self.context, amd_context],
+        )
+
+        output = finalize_cross_portfolio_output(
+            portfolio,
+            {
+                "summary": " Semiconductor exposure is concentrated. ",
+                "correlations_flagged": [" NVDA and AMD moved together. "],
+            },
+        )
+
+        self.assertEqual(output.user_id, "user-1")
+        self.assertEqual(output.tickers_analyzed, ["NVDA", "AMD"])
+        self.assertEqual(output.summary, "Semiconductor exposure is concentrated.")
+        self.assertEqual(
+            output.correlations_flagged,
+            ["NVDA and AMD moved together."],
+        )
+
+    def test_cross_portfolio_rejects_another_users_position(self):
+        other_user_context = agent_context().model_copy(
+            update={
+                "subscription": agent_context().subscription.model_copy(
+                    update={"user_id": "user-2"}
+                )
+            }
+        )
+        portfolio = PortfolioContext(
+            user_id="user-1",
+            positions=[other_user_context],
+        )
+
+        with self.assertRaisesRegex(AgentOutputValidationError, "trusted user"):
+            finalize_cross_portfolio_output(
+                portfolio,
+                {
+                    "summary": "Portfolio summary.",
+                    "correlations_flagged": [],
+                },
+            )
 
 
 if __name__ == "__main__":

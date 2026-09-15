@@ -246,7 +246,7 @@ class HypothesisOutput(AgentOutput):
     summary: Optional[str] = None          # None if nothing flagged
     recommendation: str = ""
     flagged: bool = False
-    recommended_next_scan_days: int        # Claude decides this
+    recommended_next_scan_days: int = Field(ge=1, le=3)  # Claude decides this
 
 # notifications ------
 

@@ -13,9 +13,17 @@ from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool, StructuredTool, ToolException
 from langchain_anthropic import ChatAnthropic
 from langgraph.graph.message import add_messages
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from supabase import Client
 
+from config.prompts import web_research_prompt
 from config.settings import settings
 from data.database import (
     DatabaseError,
@@ -31,13 +39,18 @@ from models.schemas import (
     AgentType,
     Alert,
     AlertType,
+    Confidence,
+    CrossPortfolioOutput,
+    EventType,
     HypothesisOutput,
+    PortfolioContext,
     ResearchSource,
 )
 from security.credentials import CredentialCipher, CredentialSecurityError
 
 
 TickerAgentOutput: TypeAlias = AgentOutput | HypothesisOutput
+StructuredAgentOutput: TypeAlias = TickerAgentOutput | CrossPortfolioOutput
 MAX_AGENT_MARKET_RESULTS = 150
 MAX_AGENT_MEMORY_RESULTS = 20
 WEB_SEARCH_TOOL_TYPE = "web_search_20250305"
@@ -68,6 +81,10 @@ class WebResearchError(RuntimeError):
     """Raised when server-side web research cannot produce a usable result."""
 
 
+class AgentOutputValidationError(RuntimeError):
+    """Raised when model analysis cannot become a trusted agent output."""
+
+
 class WebResearchFocus(str, Enum):
     PRICE_CATALYST = "price_catalyst"
     COMPANY_NEWS = "company_news"
@@ -81,6 +98,89 @@ class WebResearchResult(BaseModel):
     sources: list[ResearchSource] = Field(default_factory=list)
     search_requests: int = Field(default=0, ge=0)
     messages: list[AIMessage] = Field(default_factory=list, exclude=True)
+
+
+class StructuredOutputDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class TickerAnalysisDraft(StructuredOutputDraft):
+    summary: str = Field(min_length=1, max_length=4000)
+    recommendation: str = Field(min_length=1, max_length=2000)
+    confidence: Confidence
+
+    @field_validator("summary", "recommendation")
+    @classmethod
+    def text_must_not_be_blank(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("analysis text must not be blank")
+        return normalized
+
+
+class HypothesisAnalysisDraft(StructuredOutputDraft):
+    summary: str | None = Field(default=None, max_length=4000)
+    recommendation: str = Field(default="", max_length=2000)
+    confidence: Confidence
+    flagged: bool
+    recommended_next_scan_days: int = Field(ge=1, le=3)
+
+    @model_validator(mode="after")
+    def content_must_match_flag(self) -> HypothesisAnalysisDraft:
+        summary = self.summary.strip() if self.summary is not None else None
+        recommendation = self.recommendation.strip()
+        if self.flagged and (not summary or not recommendation):
+            raise ValueError(
+                "flagged hypotheses require a summary and recommendation"
+            )
+        if not self.flagged and (summary or recommendation):
+            raise ValueError(
+                "unflagged hypotheses must not include a summary or recommendation"
+            )
+        self.summary = summary
+        self.recommendation = recommendation
+        return self
+
+
+class CrossPortfolioAnalysisDraft(StructuredOutputDraft):
+    summary: str = Field(min_length=1, max_length=4000)
+    correlations_flagged: list[str] = Field(default_factory=list, max_length=10)
+
+    @field_validator("summary")
+    @classmethod
+    def summary_must_not_be_blank(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("summary must not be blank")
+        return normalized
+
+    @field_validator("correlations_flagged")
+    @classmethod
+    def correlations_must_not_be_blank(cls, values: list[str]) -> list[str]:
+        normalized = [value.strip() for value in values]
+        if any(not value for value in normalized):
+            raise ValueError("correlations must not contain blank entries")
+        return normalized
+
+
+StructuredOutputDraftType: TypeAlias = (
+    TickerAnalysisDraft | HypothesisAnalysisDraft | CrossPortfolioAnalysisDraft
+)
+
+_DRAFT_SCHEMA_BY_AGENT: dict[AgentType, type[StructuredOutputDraft]] = {
+    AgentType.SCHEDULED_REVIEW: TickerAnalysisDraft,
+    AgentType.SHARP_MOVE: TickerAnalysisDraft,
+    AgentType.MOTIVE: TickerAnalysisDraft,
+    AgentType.HYPOTHESIS: HypothesisAnalysisDraft,
+    AgentType.CROSS_PORTFOLIO: CrossPortfolioAnalysisDraft,
+}
+
+_EVENT_TYPE_BY_AGENT = {
+    AgentType.SCHEDULED_REVIEW: EventType.SCHEDULED_UPDATE,
+    AgentType.SHARP_MOVE: EventType.SHARP_MOVE,
+    AgentType.MOTIVE: EventType.MOTIVE_CHECK,
+    AgentType.HYPOTHESIS: EventType.HYPOTHESIS_SCAN,
+}
 
 
 class AgentToolInput(BaseModel):
@@ -271,6 +371,153 @@ def create_user_model(
         ) from None
 
 
+def get_structured_output_schema(
+    agent_type: AgentType | str,
+) -> type[StructuredOutputDraft]:
+    """Return the model-owned draft schema for an agent."""
+    return _DRAFT_SCHEMA_BY_AGENT[AgentType(agent_type)]
+
+
+def bind_structured_output(
+    model: BaseChatModel,
+    agent_type: AgentType | str,
+) -> Runnable[Any, StructuredOutputDraftType]:
+    """Bind native structured output without exposing trusted output fields."""
+    schema = get_structured_output_schema(agent_type)
+    return model.with_structured_output(
+        schema,
+        method="json_schema",
+        include_raw=False,
+    )
+
+
+def _validate_structured_draft(
+    agent_type: AgentType,
+    draft: BaseModel | dict[str, Any],
+) -> StructuredOutputDraftType:
+    schema = get_structured_output_schema(agent_type)
+    try:
+        return schema.model_validate(draft)
+    except (ValidationError, TypeError):
+        raise AgentOutputValidationError(
+            "The model returned an invalid structured analysis."
+        ) from None
+
+
+def _trusted_research_metadata(
+    state: TickerAgentState,
+) -> tuple[list[ResearchSource], int]:
+    raw_sources = state.get("research_sources", [])
+    raw_request_count = state.get("web_search_requests", 0)
+    if not isinstance(raw_sources, list):
+        raise AgentOutputValidationError("Agent research sources are invalid.")
+    if (
+        isinstance(raw_request_count, bool)
+        or not isinstance(raw_request_count, int)
+        or raw_request_count < 0
+    ):
+        raise AgentOutputValidationError("Agent web-search usage is invalid.")
+
+    sources_by_url: dict[str, ResearchSource] = {}
+    try:
+        for raw_source in raw_sources:
+            source = ResearchSource.model_validate(raw_source)
+            sources_by_url[str(source.url)] = source
+    except (ValidationError, TypeError):
+        raise AgentOutputValidationError("Agent research sources are invalid.") from None
+    return list(sources_by_url.values()), raw_request_count
+
+
+def finalize_ticker_output(
+    state: TickerAgentState,
+    agent_type: AgentType | str,
+    draft: BaseModel | dict[str, Any],
+) -> TickerAgentOutput:
+    """Combine model analysis with trusted ticker-run fields."""
+    normalized_agent_type = AgentType(agent_type)
+    if normalized_agent_type == AgentType.CROSS_PORTFOLIO:
+        raise AgentOutputValidationError(
+            "Cross-portfolio output requires PortfolioContext."
+        )
+    context = state.get("context")
+    if not isinstance(context, AgentContext):
+        raise AgentOutputValidationError("Ticker agent context is missing or invalid.")
+    user_id, ticker = _bound_ticker_identity(context)
+    if context.event_type != _EVENT_TYPE_BY_AGENT[normalized_agent_type]:
+        raise AgentOutputValidationError(
+            "Agent type does not match the trusted event type."
+        )
+
+    validated_draft = _validate_structured_draft(normalized_agent_type, draft)
+    sources, search_requests = _trusted_research_metadata(state)
+    trusted_fields = {
+        "ticker": ticker,
+        "user_id": user_id,
+        "event_type": context.event_type,
+        "price_at_update": context.current_price,
+        "searched_web": bool(sources or search_requests),
+        "sources": sources,
+        "web_search_requests": search_requests,
+    }
+
+    try:
+        if isinstance(validated_draft, HypothesisAnalysisDraft):
+            return HypothesisOutput(
+                **trusted_fields,
+                **validated_draft.model_dump(),
+            )
+        if not isinstance(validated_draft, TickerAnalysisDraft):
+            raise AgentOutputValidationError(
+                "Ticker agent received the wrong analysis schema."
+            )
+        return AgentOutput(
+            **trusted_fields,
+            **validated_draft.model_dump(),
+        )
+    except ValidationError:
+        raise AgentOutputValidationError(
+            "The structured analysis could not form a valid agent output."
+        ) from None
+
+
+def finalize_cross_portfolio_output(
+    context: PortfolioContext,
+    draft: BaseModel | dict[str, Any],
+) -> CrossPortfolioOutput:
+    """Combine portfolio analysis with trusted user and ticker fields."""
+    portfolio_user_id = context.user_id.strip()
+    if not portfolio_user_id or not context.positions:
+        raise AgentOutputValidationError("Portfolio context is missing or invalid.")
+    tickers: list[str] = []
+    for position in context.positions:
+        user_id, ticker = _bound_ticker_identity(position)
+        if user_id != portfolio_user_id:
+            raise AgentOutputValidationError(
+                "Portfolio positions must belong to the trusted user."
+            )
+        if ticker not in tickers:
+            tickers.append(ticker)
+
+    validated_draft = _validate_structured_draft(
+        AgentType.CROSS_PORTFOLIO,
+        draft,
+    )
+    if not isinstance(validated_draft, CrossPortfolioAnalysisDraft):
+        raise AgentOutputValidationError(
+            "Cross-portfolio agent received the wrong analysis schema."
+        )
+    try:
+        return CrossPortfolioOutput(
+            user_id=portfolio_user_id,
+            tickers_analyzed=tickers,
+            **validated_draft.model_dump(),
+        )
+    except ValidationError:
+        raise AgentOutputValidationError(
+            "The structured analysis could not form a valid portfolio output."
+        ) from None
+
+
 def bind_web_search(
     model: BaseChatModel,
     *,
@@ -298,29 +545,7 @@ def bind_web_search(
 
 
 def _public_research_prompt(ticker: str, focus: WebResearchFocus) -> str:
-    instructions = {
-        WebResearchFocus.PRICE_CATALYST: (
-            "Find current public news, filings, or market events that may explain "
-            "the ticker's recent price movement."
-        ),
-        WebResearchFocus.COMPANY_NEWS: (
-            "Find material recent company news, announcements, and filings."
-        ),
-        WebResearchFocus.EARNINGS: (
-            "Find the latest earnings release, guidance, and material analyst context."
-        ),
-        WebResearchFocus.SECTOR: (
-            "Find current sector or industry developments that may affect this ticker."
-        ),
-        WebResearchFocus.REGULATORY: (
-            "Find current regulatory, legal, or policy developments affecting this ticker."
-        ),
-    }
-    return (
-        f"Research the public-market ticker {ticker}. {instructions[focus]} "
-        "Use current, reputable primary sources when available. Distinguish confirmed "
-        "facts from inference, keep the result concise, and cite every material claim."
-    )
+    return web_research_prompt(ticker, focus.value)
 
 
 def _walk_content(value: Any) -> Iterator[dict[str, Any]]:
