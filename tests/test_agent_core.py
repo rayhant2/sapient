@@ -911,6 +911,38 @@ class StructuredOutputTests(unittest.TestCase):
         self.assertIsNone(unflagged.summary)
         self.assertEqual(unflagged.recommended_next_scan_days, 3)
 
+        with self.assertRaisesRegex(
+            AgentOutputValidationError,
+            "invalid structured analysis",
+        ):
+            finalize_ticker_output(
+                state,
+                AgentType.HYPOTHESIS,
+                {
+                    "summary": None,
+                    "recommendation": "",
+                    "confidence": "low",
+                    "flagged": False,
+                    "recommended_next_scan_days": 1,
+                },
+            )
+
+        with self.assertRaisesRegex(
+            AgentOutputValidationError,
+            "invalid structured analysis",
+        ):
+            finalize_ticker_output(
+                state,
+                AgentType.HYPOTHESIS,
+                {
+                    "summary": "A pattern is developing.",
+                    "recommendation": "Monitor the next session.",
+                    "confidence": "medium",
+                    "flagged": True,
+                    "recommended_next_scan_days": 3,
+                },
+            )
+
         with self.assertRaises(AgentOutputValidationError):
             finalize_ticker_output(
                 state,

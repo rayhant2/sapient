@@ -156,6 +156,10 @@ class HypothesisAnalysisDraft(StructuredOutputDraft):
             raise ValueError(
                 "unflagged hypotheses must not include a summary or recommendation"
             )
+        if self.flagged and self.recommended_next_scan_days == 3:
+            raise ValueError("flagged hypotheses require a one- or two-day rescan")
+        if not self.flagged and self.recommended_next_scan_days != 3:
+            raise ValueError("unflagged hypotheses require a three-day rescan")
         self.summary = summary
         self.recommendation = recommendation
         return self
