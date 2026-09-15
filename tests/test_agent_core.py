@@ -426,6 +426,7 @@ class TickerAgentToolTests(unittest.TestCase):
                 "get_latest_agent_update",
                 "get_recent_agent_updates",
                 "get_recent_alerts",
+                "get_portfolio_snapshot",
             },
         )
         for tool in tools.values():
@@ -522,6 +523,30 @@ class TickerAgentToolTests(unittest.TestCase):
             client=self.client,
         )
         self.assertEqual(json.loads(result)[0]["message"], "NVDA moved sharply.")
+
+    @patch("agents.core.list_latest_portfolio_updates")
+    def test_portfolio_snapshot_excludes_current_ticker_and_user_id(
+        self, list_portfolio_updates
+    ):
+        current = AgentOutput(
+            ticker="NVDA",
+            user_id="user-1",
+            event_type=EventType.SCHEDULED_UPDATE,
+            summary="Current ticker.",
+            recommendation="Monitor.",
+            confidence=Confidence.MEDIUM,
+        )
+        related = current.model_copy(
+            update={"ticker": "AMD", "summary": "Semiconductors are weaker."}
+        )
+        list_portfolio_updates.return_value = [current, related]
+
+        result = self.tools_by_name()["get_portfolio_snapshot"].invoke({})
+
+        list_portfolio_updates.assert_called_once_with("user-1", client=self.client)
+        payload = json.loads(result)
+        self.assertEqual([item["ticker"] for item in payload], ["AMD"])
+        self.assertNotIn("user_id", result)
 
     @patch("agents.core.get_latest_ticker_data")
     def test_tool_errors_are_sanitized(self, get_history):

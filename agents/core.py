@@ -39,6 +39,7 @@ from data.database import (
     get_latest_ticker_data,
     get_latest_update,
     insert_agent_output,
+    list_latest_portfolio_updates,
     list_recent_alerts,
     list_recent_updates,
     resolve_user_api_key,
@@ -253,6 +254,10 @@ class RecentAlertsToolInput(AgentToolInput):
         if value is not None and (value.tzinfo is None or value.utcoffset() is None):
             raise ValueError("since must be timezone-aware")
         return value
+
+
+class PortfolioSnapshotToolInput(AgentToolInput):
+    pass
 
 
 class TickerAgentState(TypedDict):
@@ -1029,7 +1034,9 @@ def build_ticker_agent_tools(
                 client=client,
             )
         except Exception:
-            raise ToolException("Previous agent output is temporarily unavailable.") from None
+            raise ToolException(
+                "Previous agent output is temporarily unavailable."
+            ) from None
         return _serialize_tool_models(output)
 
     def recent_agent_updates(
@@ -1047,7 +1054,9 @@ def build_ticker_agent_tools(
                 client=client,
             )
         except Exception:
-            raise ToolException("Recent agent outputs are temporarily unavailable.") from None
+            raise ToolException(
+                "Recent agent outputs are temporarily unavailable."
+            ) from None
         return _serialize_tool_models(outputs)
 
     def recent_alert_history(
@@ -1067,6 +1076,33 @@ def build_ticker_agent_tools(
         except Exception:
             raise ToolException("Recent alerts are temporarily unavailable.") from None
         return _serialize_tool_models(alerts)
+
+    def portfolio_snapshot() -> str:
+        try:
+            outputs = list_latest_portfolio_updates(user_id, client=client)
+        except Exception:
+            raise ToolException(
+                "Portfolio updates are temporarily unavailable."
+            ) from None
+        payload = [
+            {
+                "ticker": getattr(output, "ticker", None),
+                "event_type": getattr(output, "event_type", None),
+                "summary": output.summary,
+                "recommendation": getattr(output, "recommendation", None),
+                "confidence": getattr(output, "confidence", None),
+                "timestamp": output.timestamp,
+                "price_at_update": getattr(output, "price_at_update", None),
+            }
+            for output in outputs
+            if getattr(output, "ticker", None) != ticker
+        ]
+        return json.dumps(
+            payload,
+            default=str,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
 
     return [
         StructuredTool.from_function(
@@ -1095,6 +1131,16 @@ def build_ticker_agent_tools(
             name="get_recent_alerts",
             description="Load recent alert history for the current position.",
             args_schema=RecentAlertsToolInput,
+            handle_tool_error=True,
+        ),
+        StructuredTool.from_function(
+            func=portfolio_snapshot,
+            name="get_portfolio_snapshot",
+            description=(
+                "Load the newest stored update for the user's other subscribed "
+                "tickers without exposing user identity."
+            ),
+            args_schema=PortfolioSnapshotToolInput,
             handle_tool_error=True,
         ),
     ]
