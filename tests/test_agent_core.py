@@ -20,6 +20,7 @@ from agents.core import (
     WebResearchFocus,
     bind_structured_output,
     bind_web_search,
+    build_portfolio_agent_state,
     build_ticker_agent_tools,
     build_ticker_agent_state,
     hydrate_ticker_agent_state,
@@ -961,6 +962,212 @@ class StructuredOutputTests(unittest.TestCase):
                     "correlations_flagged": [],
                 },
             )
+
+
+class AgentExecutionTests(unittest.TestCase):
+    def setUp(self):
+        self.context = agent_context()
+        self.state = build_ticker_agent_state(self.context)
+        self.output = finalize_ticker_output(
+            self.state,
+            AgentType.SCHEDULED_REVIEW,
+            {
+                "summary": "Position remains stable.",
+                "recommendation": "Continue monitoring.",
+                "confidence": "medium",
+            },
+        )
+        self.graph = MagicMock()
+        self.graph.invoke.return_value = {**self.state, "output": self.output}
+        self.graph_factory = MagicMock(return_value=self.graph)
+        self.database_client = MagicMock(name="database-client")
+        self.credential_client = MagicMock(name="credential-client")
+        self.cipher = MagicMock(name="credential-cipher")
+
+    def test_ticker_execution_runs_once_with_safe_trace_data_and_persists(self):
+        model = MagicMock(name="user-model")
+        tools = [MagicMock(name="bound-tool")]
+        with (
+            patch("agents.core.hydrate_ticker_agent_state", return_value=self.state) as hydrate,
+            patch("agents.core.build_ticker_agent_tools", return_value=tools) as build_tools,
+            patch("agents.core.create_user_model", return_value=model) as create_model,
+            patch("agents.core.insert_agent_output", return_value=self.output) as insert_output,
+        ):
+            result = core.execute_ticker_agent(
+                self.context,
+                AgentType.SCHEDULED_REVIEW,
+                self.graph_factory,
+                database_client=self.database_client,
+                credential_client=self.credential_client,
+                cipher=self.cipher,
+                update_limit=4,
+                alert_limit=3,
+            )
+
+        self.assertEqual(result, self.output)
+        hydrate.assert_called_once_with(
+            self.context,
+            AgentType.SCHEDULED_REVIEW,
+            update_limit=4,
+            alert_limit=3,
+            client=self.database_client,
+        )
+        build_tools.assert_called_once_with(
+            self.context,
+            client=self.database_client,
+        )
+        create_model.assert_called_once_with(
+            "user-1",
+            client=self.credential_client,
+            cipher=self.cipher,
+        )
+        self.graph_factory.assert_called_once_with(model, tools)
+        self.graph.invoke.assert_called_once()
+        invoke_config = self.graph.invoke.call_args.kwargs["config"]
+        self.assertEqual(invoke_config["metadata"]["ticker"], "NVDA")
+        self.assertEqual(
+            invoke_config["recursion_limit"],
+            core.settings.agent_graph_recursion_limit,
+        )
+        self.assertNotIn("user-1", str(invoke_config))
+        self.assertNotIn("api_key", str(invoke_config).lower())
+        insert_output.assert_called_once_with(
+            self.output,
+            client=self.database_client,
+        )
+
+    def test_graph_failure_is_sanitized_and_not_retried(self):
+        self.graph.invoke.side_effect = RuntimeError("provider detail")
+        with (
+            patch("agents.core.hydrate_ticker_agent_state", return_value=self.state),
+            patch("agents.core.build_ticker_agent_tools", return_value=[]),
+            patch("agents.core.create_user_model", return_value=MagicMock()),
+            patch("agents.core.insert_agent_output") as insert_output,
+        ):
+            with self.assertRaisesRegex(
+                core.AgentExecutionError,
+                "could not complete",
+            ) as raised:
+                core.execute_ticker_agent(
+                    self.context,
+                    AgentType.SCHEDULED_REVIEW,
+                    self.graph_factory,
+                )
+
+        self.assertNotIn("provider detail", str(raised.exception))
+        self.assertIsNone(raised.exception.__cause__)
+        self.graph.invoke.assert_called_once()
+        insert_output.assert_not_called()
+
+    def test_invalid_graph_output_is_not_persisted(self):
+        self.graph.invoke.return_value = {**self.state, "output": None}
+        with (
+            patch("agents.core.hydrate_ticker_agent_state", return_value=self.state),
+            patch("agents.core.build_ticker_agent_tools", return_value=[]),
+            patch("agents.core.create_user_model", return_value=MagicMock()),
+            patch("agents.core.insert_agent_output") as insert_output,
+        ):
+            with self.assertRaises(AgentOutputValidationError):
+                core.execute_ticker_agent(
+                    self.context,
+                    AgentType.SCHEDULED_REVIEW,
+                    self.graph_factory,
+                )
+
+        insert_output.assert_not_called()
+
+    def test_graph_output_validation_error_is_not_obscured(self):
+        self.graph.invoke.side_effect = AgentOutputValidationError(
+            "The model returned an invalid structured analysis."
+        )
+        with (
+            patch("agents.core.hydrate_ticker_agent_state", return_value=self.state),
+            patch("agents.core.build_ticker_agent_tools", return_value=[]),
+            patch("agents.core.create_user_model", return_value=MagicMock()),
+        ):
+            with self.assertRaisesRegex(
+                AgentOutputValidationError,
+                "invalid structured analysis",
+            ):
+                core.execute_ticker_agent(
+                    self.context,
+                    AgentType.SCHEDULED_REVIEW,
+                    self.graph_factory,
+                )
+
+        self.graph.invoke.assert_called_once()
+
+    def test_persistence_failure_does_not_repeat_graph(self):
+        with (
+            patch("agents.core.hydrate_ticker_agent_state", return_value=self.state),
+            patch("agents.core.build_ticker_agent_tools", return_value=[]),
+            patch("agents.core.create_user_model", return_value=MagicMock()),
+            patch(
+                "agents.core.insert_agent_output",
+                side_effect=DatabaseError("private database detail"),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                core.AgentPersistenceError,
+                "could not be persisted",
+            ) as raised:
+                core.execute_ticker_agent(
+                    self.context,
+                    AgentType.SCHEDULED_REVIEW,
+                    self.graph_factory,
+                )
+
+        self.assertNotIn("private database detail", str(raised.exception))
+        self.assertIsNone(raised.exception.__cause__)
+        self.graph.invoke.assert_called_once()
+
+    def test_cross_portfolio_execution_uses_user_model_and_persists(self):
+        portfolio = PortfolioContext(user_id="user-1", positions=[self.context])
+        portfolio_output = finalize_cross_portfolio_output(
+            portfolio,
+            {
+                "summary": "Portfolio remains concentrated.",
+                "correlations_flagged": [],
+            },
+        )
+        graph = MagicMock()
+        graph.invoke.return_value = {
+            **build_portfolio_agent_state(portfolio),
+            "output": portfolio_output,
+        }
+        graph_factory = MagicMock(return_value=graph)
+        model = MagicMock(name="user-model")
+
+        with (
+            patch("agents.core.create_user_model", return_value=model) as create_model,
+            patch(
+                "agents.core.insert_agent_output",
+                return_value=portfolio_output,
+            ) as insert_output,
+        ):
+            result = core.execute_cross_portfolio_agent(
+                portfolio,
+                graph_factory,
+                database_client=self.database_client,
+                credential_client=self.credential_client,
+                cipher=self.cipher,
+            )
+
+        self.assertEqual(result, portfolio_output)
+        create_model.assert_called_once_with(
+            "user-1",
+            client=self.credential_client,
+            cipher=self.cipher,
+        )
+        graph_factory.assert_called_once_with(model)
+        graph.invoke.assert_called_once()
+        invoke_config = graph.invoke.call_args.kwargs["config"]
+        self.assertEqual(invoke_config["metadata"]["ticker_count"], 1)
+        self.assertNotIn("user-1", str(invoke_config))
+        insert_output.assert_called_once_with(
+            portfolio_output,
+            client=self.database_client,
+        )
 
 
 if __name__ == "__main__":

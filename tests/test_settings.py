@@ -33,6 +33,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.agent_model_max_retries, 2)
         self.assertEqual(settings.agent_web_search_max_uses, 2)
         self.assertEqual(settings.agent_web_search_max_continuations, 1)
+        self.assertEqual(settings.agent_graph_recursion_limit, 20)
         self.assertFalse(settings.langsmith_tracing)
         self.assertIsNone(settings.supabase_url)
         self.assertIsNone(settings.twelve_data_api_key)
@@ -50,6 +51,7 @@ class SettingsTests(unittest.TestCase):
                 "AGENT_MODEL_MAX_RETRIES": "4",
                 "AGENT_WEB_SEARCH_MAX_USES": "3",
                 "AGENT_WEB_SEARCH_MAX_CONTINUATIONS": "2",
+                "AGENT_GRAPH_RECURSION_LIMIT": "30",
                 "MAX_TICKER_DATAPOINTS": "200",
                 "PRICE_FETCH_INTERVAL_MINUTES": "30",
                 "TWELVE_DATA_REQUESTS_PER_MINUTE": "15",
@@ -71,6 +73,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.agent_model_max_retries, 4)
         self.assertEqual(settings.agent_web_search_max_uses, 3)
         self.assertEqual(settings.agent_web_search_max_continuations, 2)
+        self.assertEqual(settings.agent_graph_recursion_limit, 30)
         self.assertEqual(settings.max_ticker_datapoints, 200)
         self.assertEqual(settings.price_fetch_interval_minutes, 30)
         self.assertEqual(settings.twelve_data_requests_per_minute, 15)
@@ -163,6 +166,8 @@ class SettingsTests(unittest.TestCase):
             load_settings({"AGENT_WEB_SEARCH_MAX_USES": "6"})
         with self.assertRaises(ValidationError):
             load_settings({"AGENT_WEB_SEARCH_MAX_CONTINUATIONS": "3"})
+        with self.assertRaises(ValidationError):
+            load_settings({"AGENT_GRAPH_RECURSION_LIMIT": "101"})
 
     def test_anthropic_model_must_not_be_blank(self):
         with self.assertRaises(ValidationError):

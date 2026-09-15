@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     agent_model_max_retries: int = 2
     agent_web_search_max_uses: int = 2
     agent_web_search_max_continuations: int = 1
+    agent_graph_recursion_limit: int = 20
 
     langsmith_tracing: bool = False
     langsmith_api_key: Optional[SecretStr] = None
@@ -81,6 +82,7 @@ class Settings(BaseSettings):
         "default_hypothesis_scan_days",
         "agent_model_max_tokens",
         "agent_web_search_max_uses",
+        "agent_graph_recursion_limit",
     )
     @classmethod
     def must_be_positive(cls, value: int) -> int:
@@ -116,6 +118,13 @@ class Settings(BaseSettings):
             raise ValueError(
                 "agent_web_search_max_continuations must be between 0 and 2"
             )
+        return value
+
+    @field_validator("agent_graph_recursion_limit")
+    @classmethod
+    def graph_recursion_limit_must_be_bounded(cls, value: int) -> int:
+        if not 1 <= value <= 100:
+            raise ValueError("agent_graph_recursion_limit must be between 1 and 100")
         return value
 
     @field_validator(

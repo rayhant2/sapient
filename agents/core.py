@@ -5,11 +5,20 @@ import re
 from datetime import datetime
 from enum import Enum
 from operator import add
-from typing import Annotated, Any, Iterator, NotRequired, TypeAlias, TypedDict
+from typing import (
+    Annotated,
+    Any,
+    Callable,
+    Iterator,
+    Mapping,
+    NotRequired,
+    TypeAlias,
+    TypedDict,
+)
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage
-from langchain_core.runnables import Runnable
+from langchain_core.runnables import Runnable, RunnableConfig
 from langchain_core.tools import BaseTool, StructuredTool, ToolException
 from langchain_anthropic import ChatAnthropic
 from langgraph.graph.message import add_messages
@@ -29,6 +38,7 @@ from data.database import (
     DatabaseError,
     get_latest_ticker_data,
     get_latest_update,
+    insert_agent_output,
     list_recent_alerts,
     list_recent_updates,
     resolve_user_api_key,
@@ -83,6 +93,14 @@ class WebResearchError(RuntimeError):
 
 class AgentOutputValidationError(RuntimeError):
     """Raised when model analysis cannot become a trusted agent output."""
+
+
+class AgentExecutionError(RuntimeError):
+    """Raised when an agent graph cannot complete safely."""
+
+
+class AgentPersistenceError(RuntimeError):
+    """Raised when a completed agent output cannot be persisted."""
 
 
 class WebResearchFocus(str, Enum):
@@ -249,6 +267,24 @@ class TickerAgentState(TypedDict):
     output: NotRequired[TickerAgentOutput | None]
 
 
+class PortfolioAgentState(TypedDict):
+    """Credential-free state for the cross-portfolio graph."""
+
+    context: PortfolioContext
+    messages: NotRequired[Annotated[list[AnyMessage], add_messages]]
+    output: NotRequired[CrossPortfolioOutput | None]
+
+
+TickerGraphFactory: TypeAlias = Callable[
+    [BaseChatModel, list[BaseTool]],
+    Runnable[TickerAgentState, Mapping[str, Any]],
+]
+PortfolioGraphFactory: TypeAlias = Callable[
+    [BaseChatModel],
+    Runnable[PortfolioAgentState, Mapping[str, Any]],
+]
+
+
 def build_ticker_agent_state(context: AgentContext) -> TickerAgentState:
     """Create isolated state for one user and ticker agent run."""
     return {
@@ -258,6 +294,15 @@ def build_ticker_agent_state(context: AgentContext) -> TickerAgentState:
         "recent_alerts": [],
         "research_sources": [],
         "web_search_requests": 0,
+        "output": None,
+    }
+
+
+def build_portfolio_agent_state(context: PortfolioContext) -> PortfolioAgentState:
+    """Create isolated state for one user's cross-portfolio run."""
+    return {
+        "context": context,
+        "messages": [],
         "output": None,
     }
 
@@ -405,7 +450,7 @@ def _validate_structured_draft(
 
 
 def _trusted_research_metadata(
-    state: TickerAgentState,
+    state: Mapping[str, Any],
 ) -> tuple[list[ResearchSource], int]:
     raw_sources = state.get("research_sources", [])
     raw_request_count = state.get("web_search_requests", 0)
@@ -480,11 +525,9 @@ def finalize_ticker_output(
         ) from None
 
 
-def finalize_cross_portfolio_output(
+def _trusted_portfolio_identity(
     context: PortfolioContext,
-    draft: BaseModel | dict[str, Any],
-) -> CrossPortfolioOutput:
-    """Combine portfolio analysis with trusted user and ticker fields."""
+) -> tuple[str, list[str]]:
     portfolio_user_id = context.user_id.strip()
     if not portfolio_user_id or not context.positions:
         raise AgentOutputValidationError("Portfolio context is missing or invalid.")
@@ -497,6 +540,15 @@ def finalize_cross_portfolio_output(
             )
         if ticker not in tickers:
             tickers.append(ticker)
+    return portfolio_user_id, tickers
+
+
+def finalize_cross_portfolio_output(
+    context: PortfolioContext,
+    draft: BaseModel | dict[str, Any],
+) -> CrossPortfolioOutput:
+    """Combine portfolio analysis with trusted user and ticker fields."""
+    portfolio_user_id, tickers = _trusted_portfolio_identity(context)
 
     validated_draft = _validate_structured_draft(
         AgentType.CROSS_PORTFOLIO,
@@ -515,6 +567,228 @@ def finalize_cross_portfolio_output(
     except ValidationError:
         raise AgentOutputValidationError(
             "The structured analysis could not form a valid portfolio output."
+        ) from None
+
+
+def _agent_run_config(
+    agent_type: AgentType,
+    *,
+    event_type: EventType | None = None,
+    ticker: str | None = None,
+    ticker_count: int | None = None,
+) -> RunnableConfig:
+    metadata: dict[str, Any] = {"agent_type": agent_type.value}
+    tags = ["sentient", agent_type.value]
+    if event_type is not None:
+        metadata["event_type"] = event_type.value
+        tags.append(event_type.value)
+    if ticker is not None:
+        metadata["ticker"] = ticker
+    if ticker_count is not None:
+        metadata["ticker_count"] = ticker_count
+    return {
+        "run_name": f"sentient.{agent_type.value}",
+        "tags": tags,
+        "metadata": metadata,
+        "recursion_limit": settings.agent_graph_recursion_limit,
+    }
+
+
+def _timestamp_is_aware(value: datetime) -> bool:
+    return value.tzinfo is not None and value.utcoffset() is not None
+
+
+def _validate_completed_ticker_output(
+    result: Mapping[str, Any],
+    context: AgentContext,
+    agent_type: AgentType,
+) -> TickerAgentOutput:
+    output = result.get("output")
+    if agent_type == AgentType.HYPOTHESIS:
+        if not isinstance(output, HypothesisOutput):
+            raise AgentOutputValidationError(
+                "The graph did not return a trusted hypothesis output."
+            )
+    elif not isinstance(output, AgentOutput) or isinstance(output, HypothesisOutput):
+        raise AgentOutputValidationError(
+            "The graph did not return a trusted ticker output."
+        )
+
+    user_id, ticker = _bound_ticker_identity(context)
+    sources, search_requests = _trusted_research_metadata(
+        {
+            "research_sources": result.get("research_sources", []),
+            "web_search_requests": result.get("web_search_requests", 0),
+        }
+    )
+    if (
+        output.user_id != user_id
+        or output.ticker != ticker
+        or output.event_type != context.event_type
+        or output.event_type != _EVENT_TYPE_BY_AGENT[agent_type]
+        or output.price_at_update != context.current_price
+        or output.sources != sources
+        or output.web_search_requests != search_requests
+        or output.searched_web != bool(sources or search_requests)
+        or not _timestamp_is_aware(output.timestamp)
+    ):
+        raise AgentOutputValidationError(
+            "The graph output does not match trusted execution context."
+        )
+    return output
+
+
+def _validate_completed_portfolio_output(
+    result: Mapping[str, Any],
+    context: PortfolioContext,
+) -> CrossPortfolioOutput:
+    output = result.get("output")
+    if not isinstance(output, CrossPortfolioOutput):
+        raise AgentOutputValidationError(
+            "The graph did not return a trusted cross-portfolio output."
+        )
+    user_id, tickers = _trusted_portfolio_identity(context)
+    if (
+        output.user_id != user_id
+        or output.tickers_analyzed != tickers
+        or not _timestamp_is_aware(output.timestamp)
+    ):
+        raise AgentOutputValidationError(
+            "The graph output does not match trusted portfolio context."
+        )
+    return output
+
+
+def _persist_completed_output(
+    output: StructuredAgentOutput,
+    *,
+    client: Client | None,
+) -> StructuredAgentOutput:
+    try:
+        return insert_agent_output(output, client=client)
+    except Exception:
+        raise AgentPersistenceError(
+            "The completed agent output could not be persisted."
+        ) from None
+
+
+def execute_ticker_agent(
+    context: AgentContext,
+    agent_type: AgentType | str,
+    graph_factory: TickerGraphFactory,
+    *,
+    database_client: Client | None = None,
+    credential_client: Client | None = None,
+    cipher: CredentialCipher | None = None,
+    update_limit: int = 5,
+    alert_limit: int = 5,
+) -> TickerAgentOutput:
+    """Execute and persist one ticker agent without retrying the full graph."""
+    normalized_agent_type = AgentType(agent_type)
+    if normalized_agent_type == AgentType.CROSS_PORTFOLIO:
+        raise ValueError("Use execute_cross_portfolio_agent for cross-portfolio runs.")
+
+    state = hydrate_ticker_agent_state(
+        context,
+        normalized_agent_type,
+        update_limit=update_limit,
+        alert_limit=alert_limit,
+        client=database_client,
+    )
+    tools = build_ticker_agent_tools(context, client=database_client)
+    user_id, ticker = _bound_ticker_identity(context)
+    model = create_user_model(
+        user_id,
+        client=credential_client,
+        cipher=cipher,
+    )
+
+    try:
+        graph = graph_factory(model, tools)
+        result = graph.invoke(
+            state,
+            config=_agent_run_config(
+                normalized_agent_type,
+                event_type=context.event_type,
+                ticker=ticker,
+            ),
+        )
+    except AgentOutputValidationError:
+        raise
+    except Exception:
+        raise AgentExecutionError("The agent graph could not complete.") from None
+    if not isinstance(result, Mapping):
+        raise AgentOutputValidationError("The agent graph returned invalid state.")
+
+    output = _validate_completed_ticker_output(
+        result,
+        context,
+        normalized_agent_type,
+    )
+    persisted = _persist_completed_output(output, client=database_client)
+    if not isinstance(persisted, (AgentOutput, HypothesisOutput)):
+        raise AgentPersistenceError(
+            "The database returned an invalid ticker output after persistence."
+        )
+    try:
+        return _validate_completed_ticker_output(
+            {**result, "output": persisted},
+            context,
+            normalized_agent_type,
+        )
+    except AgentOutputValidationError:
+        raise AgentPersistenceError(
+            "The database returned an invalid ticker output after persistence."
+        ) from None
+
+
+def execute_cross_portfolio_agent(
+    context: PortfolioContext,
+    graph_factory: PortfolioGraphFactory,
+    *,
+    database_client: Client | None = None,
+    credential_client: Client | None = None,
+    cipher: CredentialCipher | None = None,
+) -> CrossPortfolioOutput:
+    """Execute and persist one cross-portfolio graph for its trusted user."""
+    user_id, tickers = _trusted_portfolio_identity(context)
+    state = build_portfolio_agent_state(context)
+    model = create_user_model(
+        user_id,
+        client=credential_client,
+        cipher=cipher,
+    )
+
+    try:
+        graph = graph_factory(model)
+        result = graph.invoke(
+            state,
+            config=_agent_run_config(
+                AgentType.CROSS_PORTFOLIO,
+                ticker_count=len(tickers),
+            ),
+        )
+    except AgentOutputValidationError:
+        raise
+    except Exception:
+        raise AgentExecutionError("The agent graph could not complete.") from None
+    if not isinstance(result, Mapping):
+        raise AgentOutputValidationError("The agent graph returned invalid state.")
+
+    output = _validate_completed_portfolio_output(result, context)
+    persisted = _persist_completed_output(output, client=database_client)
+    if not isinstance(persisted, CrossPortfolioOutput):
+        raise AgentPersistenceError(
+            "The database returned an invalid portfolio output after persistence."
+        )
+    try:
+        return _validate_completed_portfolio_output(
+            {**result, "output": persisted},
+            context,
+        )
+    except AgentOutputValidationError:
+        raise AgentPersistenceError(
+            "The database returned an invalid portfolio output after persistence."
         ) from None
 
 
