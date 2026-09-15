@@ -175,6 +175,29 @@ class EventBusTests(unittest.TestCase):
         self.assertEqual(result.attempted, 1)
         self.assertEqual(received[0].subscription.user_id, "user-2")
 
+    def test_build_portfolio_context_loads_every_user_subscription(self):
+        def load_points(ticker, limit):
+            return datapoints(ticker)[:limit]
+
+        bus = EventBus(datapoint_loader=Mock(side_effect=load_points))
+        bus.refresh_subscription(subscription("user-1", ticker="NVDA"))
+        bus.refresh_subscription(subscription("user-1", ticker="AAPL"))
+        bus.refresh_subscription(subscription("user-2", ticker="MSFT"))
+        latest = []
+
+        context = bus.build_portfolio_context("user-1", latest)
+
+        self.assertEqual(context.user_id, "user-1")
+        self.assertEqual(context.tickers, ["AAPL", "NVDA"])
+        self.assertEqual(context.latest_outputs, [])
+        self.assertTrue(
+            all(
+                position.event_type == EventType.SCHEDULED_UPDATE
+                for position in context.positions
+            )
+        )
+        self.assertEqual(bus._datapoint_loader.call_count, 2)
+
     def test_emit_skips_data_load_when_no_targets_match(self):
         datapoint_loader = Mock(return_value=datapoints())
         bus = EventBus(datapoint_loader=datapoint_loader)

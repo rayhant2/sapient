@@ -17,8 +17,11 @@ trades.
 - Rate-limited, prioritized APScheduler refresh coordination
 - Volatility-aware sharp-move detection with personalized thresholds
 - Per-user LLM credentials required before agent execution
+- Five implemented LangGraph agents with validated structured outputs
+- Runtime handler registration, dynamic hypothesis scheduling, and portfolio-cycle
+  coordination
 
-## Five planned agents
+## Five core agents
 
 | Agent | Trigger | Responsibility |
 |---|---|---|
@@ -33,7 +36,7 @@ event. It reviews recent price behaviour, cost basis, P&L, volatility, prior
 updates, alerts, and relevant external context. It is the normal daily or weekly
 review path and is distinct from event-driven sharp-move analysis.
 
-All five agents will use the API key belonging to the user whose position is being
+All five agents use the API key belonging to the user whose position is being
 analyzed. User credentials must never enter prompts, agent state, alerts, update
 records, WhatsApp messages, logs, or LangSmith traces.
 

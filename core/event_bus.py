@@ -8,8 +8,10 @@ from config.settings import settings
 from data import database
 from models.schemas import (
     AgentContext,
+    AgentOutput,
     EventType,
     OHLCVPoint,
+    PortfolioContext,
     Subscription,
     Ticker,
     TickerRegistry,
@@ -36,6 +38,10 @@ class HandlerNotRegisteredError(EventBusError):
 
 class MissingTickerDataError(EventBusError):
     """Raised when a ticker event has no price history to dispatch."""
+
+
+class MissingPortfolioDataError(EventBusError):
+    """Raised when a user's portfolio context cannot be assembled."""
 
 
 @dataclass(frozen=True)
@@ -251,4 +257,49 @@ class EventBus:
             attempted=len(subscribers),
             succeeded=succeeded,
             failures=failures,
+        )
+
+    def build_portfolio_context(
+        self,
+        user_id: str,
+        latest_outputs: list[AgentOutput],
+    ) -> PortfolioContext:
+        """Build a user's full portfolio context from the in-memory registry."""
+        subscriptions = sorted(
+            (
+                subscription
+                for ticker_registry in self.registry.values()
+                for subscription in ticker_registry.subscribers
+                if subscription.user_id == user_id
+            ),
+            key=lambda subscription: subscription.ticker,
+        )
+        if not subscriptions:
+            raise MissingPortfolioDataError(
+                f"User {user_id} has no active subscriptions."
+            )
+
+        contexts: list[AgentContext] = []
+        for subscription in subscriptions:
+            symbol = self._ticker_symbol(subscription.ticker)
+            datapoints = self._datapoint_loader(symbol, self._max_datapoints)
+            if not datapoints:
+                raise MissingPortfolioDataError(
+                    f"Ticker {symbol} has no price history for portfolio analysis."
+                )
+            ordered = sorted(datapoints, key=lambda point: point.timestamp)[
+                -self._max_datapoints :
+            ]
+            contexts.append(
+                self._build_agent_context(
+                    subscription,
+                    ordered,
+                    EventType.SCHEDULED_UPDATE,
+                )
+            )
+
+        return PortfolioContext(
+            user_id=user_id,
+            positions=contexts,
+            latest_outputs=latest_outputs,
         )

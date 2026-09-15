@@ -356,6 +356,35 @@ class SchedulerTests(unittest.TestCase):
         with self.assertRaises(SchedulerError):
             scheduler.schedule_hypothesis_scan("missing-user", "NVDA", 2)
 
+    def test_ensure_hypothesis_scans_only_seeds_missing_jobs(self):
+        bus = EventBus()
+        bus.refresh_subscription(subscription("user-1", "NVDA"))
+        bus.refresh_subscription(subscription("user-1", "AAPL"))
+        backend = FakeScheduler()
+        existing_id = f"{HYPOTHESIS_SCAN_JOB_PREFIX}user-1:NVDA"
+        existing_run_at = self.now + timedelta(days=1)
+        backend.add_job(
+            Mock(),
+            trigger="date",
+            run_date=existing_run_at,
+            id=existing_id,
+        )
+        scheduler = SentientScheduler(
+            bus,
+            scheduler=backend,
+            now_provider=lambda: self.now,
+        )
+
+        added = scheduler.ensure_hypothesis_scans(days=3)
+
+        self.assertEqual(added, 1)
+        self.assertEqual(backend.jobs[existing_id].kwargs["run_date"], existing_run_at)
+        seeded_id = f"{HYPOTHESIS_SCAN_JOB_PREFIX}user-1:AAPL"
+        self.assertEqual(
+            backend.jobs[seeded_id].kwargs["run_date"],
+            self.now + timedelta(days=3),
+        )
+
     def test_start_loads_registry_syncs_jobs_and_starts_backend(self):
         bus = EventBus(
             ticker_loader=Mock(return_value=[]),

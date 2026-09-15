@@ -504,10 +504,39 @@ class SentientScheduler:
         )
         return run_at
 
+    def ensure_hypothesis_scans(
+        self,
+        *,
+        days: int = settings.default_hypothesis_scan_days,
+    ) -> int:
+        """Seed missing hypothesis jobs without replacing dynamic schedules."""
+        if days <= 0:
+            raise ValueError("days must be greater than zero")
+        existing_job_ids = {job.id for job in self._scheduler.get_jobs()}
+        added = 0
+        for ticker_registry in self.event_bus.registry.values():
+            symbol = self._ticker_symbol(ticker_registry.ticker)
+            for subscription in ticker_registry.subscribers:
+                job_id = (
+                    f"{HYPOTHESIS_SCAN_JOB_PREFIX}"
+                    f"{self._subscription_suffix(subscription.user_id, symbol)}"
+                )
+                if job_id in existing_job_ids:
+                    continue
+                self.schedule_hypothesis_scan(
+                    subscription.user_id,
+                    symbol,
+                    days,
+                )
+                existing_job_ids.add(job_id)
+                added += 1
+        return added
+
     def start(self, *, load_registry: bool = True) -> None:
         if load_registry:
             self.event_bus.load_registry()
         self.sync_jobs()
+        self.ensure_hypothesis_scans()
         self._scheduler.start()
 
     def shutdown(self, *, wait: bool = True) -> None:
