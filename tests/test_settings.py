@@ -37,6 +37,7 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse(settings.langsmith_tracing)
         self.assertIsNone(settings.supabase_url)
         self.assertIsNone(settings.twelve_data_api_key)
+        self.assertIsNone(settings.mvp_user_id)
 
     def test_env_vars_override_defaults(self):
         settings = load_settings(
@@ -60,6 +61,7 @@ class SettingsTests(unittest.TestCase):
                 "TWELVE_DATA_RETRY_BASE_DELAY_SECONDS": "7.5",
                 "DEFAULT_SHARP_MOVE_THRESHOLD": "0.04",
                 "TWILIO_WHATSAPP_FROM": "whatsapp:+15551234567",
+                "MVP_USER_ID": "user-1",
             }
         )
 
@@ -82,6 +84,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.twelve_data_retry_base_delay_seconds, 7.5)
         self.assertEqual(settings.default_sharp_move_threshold, 0.04)
         self.assertEqual(settings.twilio_whatsapp_from, "whatsapp:+15551234567")
+        self.assertEqual(settings.mvp_user_id, "user-1")
 
     def test_secret_fields_are_loaded_as_secret_values(self):
         settings = load_settings(

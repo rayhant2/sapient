@@ -20,6 +20,23 @@ trades.
 - Five implemented LangGraph agents with validated structured outputs
 - Runtime handler registration, dynamic hypothesis scheduling, and portfolio-cycle
   coordination
+- Twilio WhatsApp delivery with alert-specific formatting and persisted delivery logs
+- Single-user Streamlit dashboard with portfolio metrics, candlestick charts, agent
+  history, alerts, and position management
+
+## Run the MVP dashboard
+
+```bash
+uv run streamlit run dashboard/app.py
+```
+
+The dashboard automatically uses the only row in `users`. If the database later
+contains more than one user, set `MVP_USER_ID` to select the account. This MVP has
+no sign-in screen; authentication and row-level user isolation remain production
+work.
+
+See [the dashboard guide](docs/dashboard.md) and
+[the WhatsApp guide](docs/whatsapp.md) for setup and behavior.
 
 ## Five core agents
 

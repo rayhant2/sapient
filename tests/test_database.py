@@ -289,6 +289,15 @@ class DatabaseTests(unittest.TestCase):
         self.assertIn(("eq", ("user_id", "missing-user"), {}), client.tables[0].calls)
         self.assertIn(("limit", (1,), {}), client.tables[0].calls)
 
+    def test_list_users_returns_models_and_applies_limit(self):
+        client = FakeClient({"users": [user_row()]})
+
+        users = database.list_users(limit=2, client=client)
+
+        self.assertEqual(users, [User.model_validate(user_row())])
+        self.assertIn(("select", ("*",), {}), client.tables[0].calls)
+        self.assertIn(("limit", (2,), {}), client.tables[0].calls)
+
     def test_delete_user_scopes_delete_to_user_id(self):
         client = FakeClient({"users": []})
 
@@ -674,6 +683,19 @@ class DatabaseTests(unittest.TestCase):
 
         self.assertEqual(inserted.alert_type, AlertType.SHARP_MOVE)
         self.assertEqual(client.tables[0].calls[0][1][0]["ticker"], "NVDA")
+
+    def test_insert_cross_portfolio_alert_allows_null_ticker(self):
+        row = alert_row()
+        row["ticker"] = None
+        row["alert_type"] = "cross_portfolio"
+        alert = Alert.model_validate(row)
+        client = FakeClient({"alerts": [row]})
+
+        inserted = database.insert_alert(alert, client=client)
+
+        payload = client.tables[0].calls[0][1][0]
+        self.assertNotIn("ticker", payload)
+        self.assertIsNone(inserted.ticker)
 
     def test_list_recent_alerts_applies_optional_filters(self):
         client = FakeClient({"alerts": [[alert_row()]]})

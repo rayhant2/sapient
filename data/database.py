@@ -311,6 +311,16 @@ def get_user(user_id: str, *, client: Optional[Client] = None) -> Optional[User]
     return _parse_model(User, row) if row else None
 
 
+def list_users(
+    limit: int = 100, *, client: Optional[Client] = None
+) -> list[User]:
+    validated_limit = _history_limit(limit)
+    response = _execute(
+        _client(client).table("users").select("*").limit(validated_limit)
+    )
+    return _parse_model_list(User, response.data)
+
+
 def delete_user(user_id: str, *, client: Optional[Client] = None) -> None:
     _execute(
         _client(client)
@@ -738,7 +748,8 @@ def list_updates_for_user_ticker(
 
 def insert_alert(alert: Alert, *, client: Optional[Client] = None) -> Alert:
     payload = _model_payload(alert)
-    payload["ticker"] = _ticker_symbol(payload["ticker"])
+    if "ticker" in payload:
+        payload["ticker"] = _ticker_symbol(payload["ticker"])
 
     response = _execute(_client(client).table("alerts").insert(payload))
     row = _require_single_row(response.data, "insert_alert")

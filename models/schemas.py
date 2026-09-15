@@ -252,7 +252,7 @@ class HypothesisOutput(AgentOutput):
 
 class Alert(BaseModel):
     user_id: str
-    ticker: str
+    ticker: Optional[str] = None
     timestamp: datetime = Field(default_factory=utc_now)
     alert_type: AlertType
     message: str

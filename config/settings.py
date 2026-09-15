@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     twilio_account_sid: Optional[SecretStr] = None
     twilio_auth_token: Optional[SecretStr] = None
     twilio_whatsapp_from: Optional[str] = None
+    mvp_user_id: Optional[str] = None
 
     max_ticker_datapoints: int = 150
     price_fetch_interval_minutes: int = 15

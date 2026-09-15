@@ -10,8 +10,12 @@ dependencies = [
     "langchain-anthropic>=1.7.2",
     "langgraph>=1.2.11",
     "langsmith>=0.12.4",
+    "pandas>=3.0.5",
+    "plotly>=7.1.0",
     "pydantic>=2.13.4",
     "pydantic-settings>=2.14.2",
+    "streamlit>=1.64.0",
     "supabase>=2.31.0",
     "twelvedata>=1.4.0",
+    "twilio>=9.11.1",
 ]
