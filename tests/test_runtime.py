@@ -111,6 +111,20 @@ class AgentRuntimeTests(unittest.TestCase):
         with self.assertRaises(RuntimeConfigurationError):
             AgentRuntime(self.bus, scheduler)
 
+    def test_runtime_preserves_an_explicit_falsey_output_sink(self):
+        class FalseySink:
+            def __bool__(self):
+                return False
+
+            def __call__(self, _output):
+                return None
+
+        sink = FalseySink()
+
+        runtime = AgentRuntime(self.bus, self.scheduler, output_sink=sink)
+
+        self.assertIs(runtime.output_sink, sink)
+
     def test_start_registers_handlers_before_starting_scheduler(self):
         self.runtime.start()
 

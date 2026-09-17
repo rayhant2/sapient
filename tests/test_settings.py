@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from pydantic import ValidationError
 
-from config.settings import Environment, LogLevel, Settings
+from config.settings import Environment, LogFormat, LogLevel, Settings
 
 
 def load_settings(env: dict[str, str] | None = None) -> Settings:
@@ -18,6 +18,7 @@ class SettingsTests(unittest.TestCase):
 
         self.assertEqual(settings.environment, Environment.LOCAL)
         self.assertEqual(settings.log_level, LogLevel.INFO)
+        self.assertEqual(settings.log_format, LogFormat.TEXT)
         self.assertEqual(settings.max_ticker_datapoints, 150)
         self.assertEqual(settings.price_fetch_interval_minutes, 15)
         self.assertEqual(settings.twelve_data_requests_per_minute, 8)
@@ -38,12 +39,16 @@ class SettingsTests(unittest.TestCase):
         self.assertIsNone(settings.supabase_url)
         self.assertIsNone(settings.twelve_data_api_key)
         self.assertIsNone(settings.mvp_user_id)
+        self.assertFalse(settings.whatsapp_enabled)
+        self.assertEqual(settings.health_host, "0.0.0.0")
+        self.assertEqual(settings.health_port, 8080)
 
     def test_env_vars_override_defaults(self):
         settings = load_settings(
             {
                 "ENVIRONMENT": "test",
                 "LOG_LEVEL": "debug",
+                "LOG_FORMAT": "json",
                 "LANGSMITH_TRACING": "true",
                 "LANGSMITH_PROJECT": "sentient-tests",
                 "ANTHROPIC_MODEL": "claude-test-model",
@@ -62,11 +67,15 @@ class SettingsTests(unittest.TestCase):
                 "DEFAULT_SHARP_MOVE_THRESHOLD": "0.04",
                 "TWILIO_WHATSAPP_FROM": "whatsapp:+15551234567",
                 "MVP_USER_ID": "user-1",
+                "WHATSAPP_ENABLED": "true",
+                "HEALTH_HOST": "127.0.0.1",
+                "HEALTH_PORT": "9090",
             }
         )
 
         self.assertEqual(settings.environment, Environment.TEST)
         self.assertEqual(settings.log_level, LogLevel.DEBUG)
+        self.assertEqual(settings.log_format, LogFormat.JSON)
         self.assertTrue(settings.langsmith_tracing)
         self.assertEqual(settings.langsmith_project, "sentient-tests")
         self.assertEqual(settings.anthropic_model, "claude-test-model")
@@ -85,6 +94,9 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.default_sharp_move_threshold, 0.04)
         self.assertEqual(settings.twilio_whatsapp_from, "whatsapp:+15551234567")
         self.assertEqual(settings.mvp_user_id, "user-1")
+        self.assertTrue(settings.whatsapp_enabled)
+        self.assertEqual(settings.health_host, "127.0.0.1")
+        self.assertEqual(settings.health_port, 9090)
 
     def test_secret_fields_are_loaded_as_secret_values(self):
         settings = load_settings(
@@ -125,6 +137,11 @@ class SettingsTests(unittest.TestCase):
         self.assertIsNone(settings.supabase_url)
         self.assertIsNone(settings.twelve_data_api_key)
 
+    def test_railway_port_alias_sets_health_port(self):
+        settings = load_settings({"PORT": "7777"})
+
+        self.assertEqual(settings.health_port, 7777)
+
     def test_environment_rejects_unknown_value(self):
         with self.assertRaises(ValidationError):
             load_settings({"ENVIRONMENT": "banana"})
@@ -144,6 +161,7 @@ class SettingsTests(unittest.TestCase):
             {"SHARP_MOVE_CHECK_INTERVAL_MINUTES": "-1"},
             {"DEFAULT_HYPOTHESIS_SCAN_DAYS": "0"},
             {"AGENT_MODEL_MAX_TOKENS": "0"},
+            {"HEALTH_PORT": "0"},
         ]
 
         for env in invalid_values:

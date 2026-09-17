@@ -58,7 +58,9 @@ class AgentRuntime:
             )
         self.event_bus = event_bus
         self.scheduler = scheduler
-        self.output_sink = output_sink or (lambda _output: None)
+        self.output_sink = (
+            output_sink if output_sink is not None else (lambda _output: None)
+        )
         self.database_client = database_client
         self.credential_client = credential_client
         self.cipher = cipher

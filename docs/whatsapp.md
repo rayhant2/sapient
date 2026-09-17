@@ -15,10 +15,15 @@ stored without a ticker, which the existing Supabase schema supports.
 Set these values only when real WhatsApp delivery is required:
 
 ```dotenv
+WHATSAPP_ENABLED=true
 TWILIO_ACCOUNT_SID=
 TWILIO_AUTH_TOKEN=
 TWILIO_WHATSAPP_FROM=whatsapp:+14155238886
 ```
+
+Keep `WHATSAPP_ENABLED=false` until Twilio is configured. Agent outputs will still
+be persisted and shown on the dashboard; only message delivery and alert logging
+are skipped.
 
 Each user's `whatsapp_number` must include Twilio's `whatsapp:+` prefix. For the
 Twilio Sandbox, the recipient must first join the sandbox. Production delivery

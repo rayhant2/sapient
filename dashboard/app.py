@@ -10,6 +10,7 @@ from plotly.subplots import make_subplots
 import streamlit as st
 
 from config.settings import settings
+from config.startup import StartupConfigurationError, validate_dashboard_settings
 from dashboard.services import (
     DashboardData,
     DashboardPosition,
@@ -396,6 +397,12 @@ def render_header(data: DashboardData) -> None:
 
 
 def main() -> None:
+    try:
+        validate_dashboard_settings(settings)
+    except StartupConfigurationError as exc:
+        st.error(str(exc))
+        st.stop()
+
     try:
         user_id = resolve_mvp_user_id(settings.mvp_user_id)
     except ValueError as exc:

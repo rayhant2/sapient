@@ -14,7 +14,7 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from pydantic import SecretStr
 
-from config.settings import settings
+from config.settings import Settings, settings
 
 
 _ENVELOPE_VERSION = 1
@@ -184,8 +184,10 @@ class CredentialCipher:
         return self.encrypt(plaintext, user_id=user_id, provider=provider)
 
 
-def _previous_keys_from_settings() -> dict[str, SecretStr]:
-    configured = settings.credential_previous_encryption_keys
+def _previous_keys_from_settings(
+    config: Settings = settings,
+) -> dict[str, SecretStr]:
+    configured = config.credential_previous_encryption_keys
     if configured is None:
         return {}
     try:
@@ -204,14 +206,18 @@ def _previous_keys_from_settings() -> dict[str, SecretStr]:
     return {key_id: SecretStr(key) for key_id, key in values.items()}
 
 
-@lru_cache(maxsize=1)
-def get_credential_cipher() -> CredentialCipher:
-    if settings.credential_encryption_key is None:
+def create_credential_cipher(config: Settings) -> CredentialCipher:
+    if config.credential_encryption_key is None:
         raise CredentialConfigurationError(
             "CREDENTIAL_ENCRYPTION_KEY must be configured before storing user API keys."
         )
     return CredentialCipher(
-        active_key=settings.credential_encryption_key,
-        active_key_id=settings.credential_encryption_key_id,
-        previous_keys=_previous_keys_from_settings(),
+        active_key=config.credential_encryption_key,
+        active_key_id=config.credential_encryption_key_id,
+        previous_keys=_previous_keys_from_settings(config),
     )
+
+
+@lru_cache(maxsize=1)
+def get_credential_cipher() -> CredentialCipher:
+    return create_credential_cipher(settings)

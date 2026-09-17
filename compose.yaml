@@ -1,0 +1,56 @@
+services:
+  runtime:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      HEALTH_HOST: 0.0.0.0
+      HEALTH_PORT: 8080
+      LOG_FORMAT: json
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test:
+        - CMD
+        - uv
+        - run
+        - python
+        - -c
+        - "from urllib.request import urlopen; urlopen('http://127.0.0.1:8080/health/ready', timeout=2)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  dashboard:
+    build: .
+    restart: unless-stopped
+    command:
+      - uv
+      - run
+      - streamlit
+      - run
+      - dashboard/app.py
+      - --server.address=0.0.0.0
+      - --server.port=8501
+      - --server.headless=true
+      - --browser.gatherUsageStats=false
+    environment:
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_KEY: ${SUPABASE_KEY}
+      MVP_USER_ID: ${MVP_USER_ID:-}
+    ports:
+      - "8501:8501"
+    healthcheck:
+      test:
+        - CMD
+        - uv
+        - run
+        - python
+        - -c
+        - "from urllib.request import urlopen; urlopen('http://127.0.0.1:8501/_stcore/health', timeout=2)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

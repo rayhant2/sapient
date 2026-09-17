@@ -38,6 +38,27 @@ work.
 See [the dashboard guide](docs/dashboard.md) and
 [the WhatsApp guide](docs/whatsapp.md) for setup and behavior.
 
+## Run the complete MVP
+
+Without containers:
+
+```bash
+uv run python -m config.preflight runtime
+uv run python main.py
+```
+
+Run the dashboard in a second terminal using the command above. WhatsApp is
+optional until `WHATSAPP_ENABLED=true`.
+
+With Docker:
+
+```bash
+docker compose up --build
+```
+
+See [the deployment guide](docs/deployment.md) for health checks, Railway setup,
+environment scoping, and the final external checklist.
+
 ## Five core agents
 
 | Agent | Trigger | Responsibility |

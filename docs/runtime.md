@@ -43,6 +43,21 @@ runs can be retried, and stale in-memory cycles are removed on the next market d
 ## Delivery Boundary
 
 Every completed output is sent to an injected `output_sink` after its database write.
-The default sink is intentionally a no-op because WhatsApp formatting, sending, and
-alert logging belong to the notification layer. This keeps agent execution independent
-from Twilio while giving that layer one integration point for all five output types.
+When `WHATSAPP_ENABLED=true`, the production sink formats and sends the output with
+Twilio, then records the accepted message in `alerts`. When it is false, delivery is
+skipped and the agent output remains available in `updates` and the dashboard. This
+allows the worker to run before Twilio onboarding is complete.
+
+## Operations
+
+`main.py` validates required configuration before constructing the runtime, handles
+`SIGINT` and `SIGTERM`, and shuts APScheduler down cleanly. Container logs can be
+plain text or one-line JSON using `LOG_FORMAT`.
+
+The worker exposes:
+
+- `GET /health/live`: process liveness
+- `GET /health/ready`: readiness after registry load and scheduler startup
+
+The readiness response includes only lifecycle state and active ticker count. It
+does not expose configuration, user data, credentials, or provider errors.

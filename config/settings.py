@@ -1,7 +1,7 @@
 from enum import Enum
 from typing import Optional
 
-from pydantic import AnyUrl, Field, SecretStr, field_validator
+from pydantic import AliasChoices, AnyUrl, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,6 +19,11 @@ class LogLevel(str, Enum):
     CRITICAL = "CRITICAL"
 
 
+class LogFormat(str, Enum):
+    TEXT = "text"
+    JSON = "json"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -30,6 +35,7 @@ class Settings(BaseSettings):
 
     environment: Environment = Environment.LOCAL
     log_level: LogLevel = LogLevel.INFO
+    log_format: LogFormat = LogFormat.TEXT
 
     supabase_url: Optional[AnyUrl] = None
     supabase_key: Optional[SecretStr] = None
@@ -56,7 +62,14 @@ class Settings(BaseSettings):
     twilio_account_sid: Optional[SecretStr] = None
     twilio_auth_token: Optional[SecretStr] = None
     twilio_whatsapp_from: Optional[str] = None
+    whatsapp_enabled: bool = False
     mvp_user_id: Optional[str] = None
+
+    health_host: str = "0.0.0.0"
+    health_port: int = Field(
+        default=8080,
+        validation_alias=AliasChoices("health_port", "PORT"),
+    )
 
     max_ticker_datapoints: int = 150
     price_fetch_interval_minutes: int = 15
@@ -84,6 +97,7 @@ class Settings(BaseSettings):
         "agent_model_max_tokens",
         "agent_web_search_max_uses",
         "agent_graph_recursion_limit",
+        "health_port",
     )
     @classmethod
     def must_be_positive(cls, value: int) -> int:
@@ -151,6 +165,14 @@ class Settings(BaseSettings):
         normalized = value.strip()
         if not normalized:
             raise ValueError("anthropic_model must not be blank")
+        return normalized
+
+    @field_validator("health_host")
+    @classmethod
+    def health_host_must_not_be_blank(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("health_host must not be blank")
         return normalized
 
     @field_validator("default_sharp_move_threshold")
